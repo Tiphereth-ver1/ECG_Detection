@@ -20,8 +20,3 @@ sos_low = butter(4, LOW_CUTOFF, btype='highpass', fs=fs, output='sos')
 sos_high = butter(4, HIGH_CUTOFF, btype='lowpass', fs=fs, output='sos')
 
 # Preprocessing of the .mat file saved from before. Can be copied at your own discretion
-mat_contents = loadmat('ProjectTrainData.mat')["ECG"].ravel()
-for content in mat_contents:
-    flattened = content.ravel()
-    print(len(flattened))
-    print(flattened)
