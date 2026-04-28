@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from scipy.io import loadmat
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -26,9 +28,11 @@ HIGH_CUTOFF = 40
 sos_low = butter(2, LOW_CUTOFF, btype='highpass', fs=fs, output='sos')
 sos_high = butter(2, HIGH_CUTOFF, btype='lowpass', fs=fs, output='sos')
 
+# Next to this script: dataSet/ProjectTrainData.mat (leading "/" would mean filesystem root)
+PROJECT_TRAIN_DATA = Path(__file__).resolve().parent / "dataSet" / "ProjectTrainData.mat"
 
 # Preprocessing of the .mat file saved from before. Can be copied at your own discretion
-mat_contents = loadmat('ProjectTrainData.mat')
+mat_contents = loadmat(PROJECT_TRAIN_DATA)
 # print(mat_contents["ECG"].ravel())
 
 # print(mat_contents["ECG"])
@@ -139,14 +143,13 @@ def plot_double_figure_overlay(x_axis, flattened, filtered):
     plt.savefig("referenceheart.png")
     plt.show()
 i=1
-expert_data = loadmat('ProjectTrainData.mat')["QRSexpert"].ravel()
-mat_contents = (loadmat('ProjectTrainData.mat')["ECG"].ravel())
+expert_data = loadmat(PROJECT_TRAIN_DATA)["QRSexpert"].ravel()
+mat_contents = loadmat(PROJECT_TRAIN_DATA)["ECG"].ravel()
 accuracies = []
 for signal, expert in zip(mat_contents, expert_data):
     flattened = signal.ravel()[0:DURATION]
-    expert = expert.ravel()
-    expert = [x for x in expert if x < DURATION]
-    expert = np.asarray(expert)
+    expert = expert.ravel().astype(int) - 1  # QRSexpert is MATLAB 1-based; Python indices are 0-based
+    expert = expert[(expert >= 0) & (expert < DURATION)]
     # print(expert)
 
     # print(len(flattened))
