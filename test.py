@@ -9,9 +9,9 @@ from qrs_pipeline import (
     DEFAULT_FS,
     default_train_mat,
     detect_qrs,
-    run_qrs_overlay_interactive,
     save_overlay_plot,
 )
+from qrs_debug_viewer import run_qrs_debug_viewer
 
 PROJECT_TRAIN_DATA = default_train_mat()
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "outputs" / "qrs_eval"
@@ -313,7 +313,7 @@ def main():
     args = parser.parse_args()
 
     if args.viz:
-        run_qrs_overlay_interactive(
+        run_qrs_debug_viewer(
             mat_path=args.mat,
             patient=args.patient,
             start=args.start,

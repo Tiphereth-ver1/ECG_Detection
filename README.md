@@ -101,13 +101,27 @@ The weakest record is currently record 25, mainly because it still has many fals
 
 ## Interactive Overlay Viewer
 
-Open a record in an interactive matplotlib viewer:
+Open a record in an interactive matplotlib debug viewer:
 
 ```bash
 python3 test.py --viz --patient 12 --start 0 --length 15000
 ```
 
 `--patient` is a 1-based record number, so `--patient 12` means training record 12.
+
+The viewer is implemented in `qrs_debug_viewer.py`. It draws one time-aligned figure with:
+
+- raw ECG,
+- filtered ECG,
+- `abs(filtered ECG)`,
+- main amplitude threshold,
+- integrated QRS energy,
+- energy threshold,
+- predicted QRS peaks,
+- expert QRS peaks,
+- optional main and energy candidate peaks.
+
+The right-side layer panel can hide/show each item independently. The `Hide controls` / `Show controls` button collapses or expands that panel. The `Start` and `Window` sliders control the displayed sample range, the mouse wheel zooms horizontally around the cursor, and `Prev record` / `Next record` plus `n/right` and `p/left` switch records.
 
 Useful flags:
 
@@ -122,8 +136,9 @@ Useful flags:
 
 ## Files
 
-- `qrs_pipeline.py`: ECG filtering, QRS detection, missed-beat filling, and overlay plotting.
-- `test.py`: command-line evaluation and visualization outputs.
+- `qrs_pipeline.py`: ECG filtering, QRS detection, debug signal generation, missed-beat filling, and batch overlay plotting.
+- `qrs_debug_viewer.py`: interactive QRS debug viewer with layer toggles, sliders, record navigation, and scroll zoom.
+- `test.py`: command-line evaluation, saved analysis outputs, and `--viz` entry point.
 - `README.md`: project summary and run instructions.
 
 ## Current Scope

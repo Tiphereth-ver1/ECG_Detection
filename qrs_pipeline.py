@@ -70,6 +70,36 @@ def _energy_peak_candidates(qrs_band, fs=DEFAULT_FS):
     return np.asarray(sorted(set(peaks)), dtype=int), integrated
 
 
+def _main_abs_peak_candidates_debug(filtered, fs=DEFAULT_FS):
+    strength = np.abs(filtered)
+    threshold = np.percentile(strength, MAIN_PERCENTILE)
+    distance = int(MAIN_REFRACTORY_SEC * fs)
+    peaks, _ = find_peaks(strength, height=threshold, distance=distance)
+    return peaks.astype(int), strength, float(threshold)
+
+
+def _energy_peak_candidates_debug(qrs_band, fs=DEFAULT_FS):
+    derivative = np.diff(qrs_band, prepend=qrs_band[0])
+    window = max(1, int(0.15 * fs))
+    energy = derivative * derivative
+    integrated = np.convolve(energy, np.ones(window) / window, mode="same")
+
+    mid = np.median(integrated)
+    mad = np.median(np.abs(integrated - mid))
+    threshold = float(mid + 3.5 * mad)
+    distance = int(ENERGY_REFRACTORY_SEC * fs)
+    candidates, _ = find_peaks(integrated, height=threshold, distance=distance)
+
+    radius = int(REFINE_SEC * fs)
+    peaks = []
+    for candidate in candidates:
+        lo = max(0, candidate - radius)
+        hi = min(len(qrs_band), candidate + radius + 1)
+        peaks.append(lo + int(np.argmax(np.abs(qrs_band[lo:hi]))))
+
+    return np.asarray(sorted(set(peaks)), dtype=int), integrated, threshold
+
+
 def _merge_close_peaks(peaks, strength_signal, fs=DEFAULT_FS):
     if len(peaks) == 0:
         return peaks
@@ -123,6 +153,27 @@ def detect_qrs(raw, fs=DEFAULT_FS):
     peaks = _fill_long_gaps(main_peaks, energy_peaks, filtered, fs)
 
     return filtered, peaks.astype(int)
+
+
+def detect_qrs_debug(raw, fs=DEFAULT_FS):
+    filtered = preprocess_ecg(raw, fs)
+    qrs_band = qrs_bandpass(raw, fs)
+
+    main_peaks, abs_filtered, main_threshold = _main_abs_peak_candidates_debug(filtered, fs)
+    energy_peaks, energy_integrated, energy_threshold = _energy_peak_candidates_debug(qrs_band, fs)
+    predicted_peaks = _fill_long_gaps(main_peaks, energy_peaks, filtered, fs)
+
+    return {
+        "filtered": filtered,
+        "abs_filtered": abs_filtered,
+        "main_threshold": main_threshold,
+        "qrs_band": qrs_band,
+        "energy_integrated": energy_integrated,
+        "energy_threshold": energy_threshold,
+        "main_peaks": main_peaks.astype(int),
+        "energy_peaks": energy_peaks.astype(int),
+        "predicted_peaks": predicted_peaks.astype(int),
+    }
 
 
 def predict_peaks(raw):
@@ -213,156 +264,3 @@ def save_overlay_plot(
     plt.savefig(out_path, dpi=160)
     plt.close()
 
-
-def run_qrs_overlay_interactive(
-    mat_path=None,
-    patient=1,
-    start=0,
-    length=15_000,
-    max_len=None,
-    show_raw=False,
-):
-    import matplotlib.pyplot as plt
-    from matplotlib.widgets import Button, Slider
-
-    if mat_path is None:
-        mat_path = default_train_mat()
-
-    mat_path = Path(mat_path)
-    n_subjects = len(loadmat(mat_path)["ECG"].ravel())
-    patient = max(1, min(int(patient), n_subjects))
-    current_patient = [patient - 1]
-    cache = {"key": None, "data": None}
-
-    def get_full(patient_idx):
-        key = (patient_idx, max_len, str(mat_path))
-        if cache["key"] != key:
-            raw_full, expert_full = load_recording(mat_path, patient_idx, max_len)
-            filtered_full, pred_full = predict_peaks(raw_full)
-            cache["key"] = key
-            cache["data"] = raw_full, expert_full, filtered_full, pred_full
-        return cache["data"]
-
-    def draw(patient_idx, win_start, win_len):
-        raw_full, expert_full, filtered_full, pred_full = get_full(patient_idx)
-
-        start_i = max(0, min(int(win_start), len(filtered_full) - 1))
-        end = min(start_i + int(win_len), len(filtered_full))
-
-        sl = slice(start_i, end)
-        t = np.arange(start_i, end) / DEFAULT_FS
-
-        pred = pred_full[(pred_full >= start_i) & (pred_full < end)]
-        expert_vis = (
-            expert_full[(expert_full >= start_i) & (expert_full < end)]
-            if expert_full is not None
-            else []
-        )
-
-        ax.clear()
-        if show_raw:
-            ax.plot(t, raw_full[sl], color="#aec7e8", linewidth=0.8, alpha=0.85, label="ECG raw")
-        ax.plot(t, filtered_full[sl], color="0.15", linewidth=1.0, label="ECG filtered")
-
-        if len(pred):
-            ax.scatter(
-                pred / DEFAULT_FS,
-                filtered_full[pred],
-                s=40,
-                c="tab:orange",
-                marker="v",
-                zorder=5,
-                label=f"Predicted QRS ({len(pred)})",
-            )
-
-        if expert_full is not None and len(expert_vis):
-            ax.scatter(
-                expert_vis / DEFAULT_FS,
-                filtered_full[expert_vis],
-                s=60,
-                facecolors="none",
-                edgecolors="tab:green",
-                linewidths=2,
-                zorder=6,
-                label=f"Expert QRS ({len(expert_vis)})",
-            )
-
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Amplitude (uV, filtered)")
-        ax.set_title(
-            f"{mat_path.name} | record {patient_idx + 1}/{n_subjects} "
-            f"| samples [{start_i}:{end}) | keys: n/p or arrows"
-        )
-        ax.legend(loc="upper right", fontsize=9)
-        ax.grid(True, alpha=0.25)
-        fig.canvas.draw_idle()
-
-    fig, ax = plt.subplots(figsize=(14, 5))
-    plt.subplots_adjust(bottom=0.26)
-
-    ax_slider_start = fig.add_axes((0.12, 0.14, 0.55, 0.03))
-    ax_slider_len = fig.add_axes((0.12, 0.10, 0.55, 0.03))
-    ax_btn_prev = fig.add_axes((0.12, 0.03, 0.12, 0.045))
-    ax_btn_next = fig.add_axes((0.26, 0.03, 0.12, 0.045))
-
-    raw0, _ = load_recording(mat_path, current_patient[0], max_len)
-    n0 = len(raw0)
-
-    slider_start = Slider(
-        ax_slider_start,
-        "Start",
-        0,
-        max(n0 - 1, 1),
-        valinit=min(start, max(n0 - 1, 0)),
-        valstep=1,
-    )
-    slider_len = Slider(
-        ax_slider_len,
-        "Window",
-        500,
-        min(500_000, max(n0, 500)),
-        valinit=min(length, n0),
-        valstep=100,
-    )
-    btn_prev = Button(ax_btn_prev, "Prev record")
-    btn_next = Button(ax_btn_next, "Next record")
-
-    def on_change(_val=None):
-        draw(current_patient[0], int(slider_start.val), int(slider_len.val))
-
-    def bump_subject(delta):
-        current_patient[0] = (current_patient[0] + delta) % n_subjects
-        raw_i, _ = load_recording(mat_path, current_patient[0], max_len)
-        ni = len(raw_i)
-        slider_start.valmax = max(ni - 1, 1)
-        slider_start.ax.set_xlim(slider_start.valmin, slider_start.valmax)
-        slider_len.valmax = min(500_000, max(ni, 500))
-        slider_len.ax.set_xlim(slider_len.valmin, slider_len.valmax)
-        slider_start.eventson = False
-        slider_len.eventson = False
-        slider_start.set_val(0)
-        if float(slider_len.val) > slider_len.valmax:
-            slider_len.set_val(slider_len.valmax)
-        slider_start.eventson = True
-        slider_len.eventson = True
-        on_change()
-
-    slider_start.on_changed(on_change)
-    slider_len.on_changed(on_change)
-
-    btn_prev.on_clicked(lambda _e: bump_subject(-1))
-    btn_next.on_clicked(lambda _e: bump_subject(1))
-
-    def on_key(event):
-        if event.key is None:
-            return
-        key = event.key.lower()
-        if key in ("n", "right"):
-            bump_subject(1)
-        elif key in ("p", "left"):
-            bump_subject(-1)
-
-    fig.canvas.mpl_connect("key_press_event", on_key)
-
-    draw(current_patient[0], start, length)
-    plt.show()
