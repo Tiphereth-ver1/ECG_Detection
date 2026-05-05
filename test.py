@@ -1,5 +1,6 @@
 import argparse
 import csv
+import os
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,8 @@ def calculate_hr_hrv(peaks):
 
 
 def match_qrs(predicted, expert, tolerance_samples=5):
+    # One-to-one matching with a fixed tolerance. Each predicted point can match
+    # at most one expert point, which keeps TP/FP/FN accounting honest.
     predicted = np.asarray(predicted, dtype=int)
     expert = np.asarray(expert, dtype=int)
 
@@ -40,9 +43,11 @@ def match_qrs(predicted, expert, tolerance_samples=5):
     search_start = 0
 
     for expert_peak in expert:
+        # Move past predictions that are already too early for this expert beat.
         while search_start < len(predicted) and predicted[search_start] < expert_peak - tolerance_samples:
             search_start += 1
 
+        # Pick the nearest unused predicted peak inside the tolerance window.
         best_idx = -1
         best_dist = tolerance_samples + 1
         idx = search_start
@@ -80,7 +85,58 @@ def match_qrs(predicted, expert, tolerance_samples=5):
     }
 
 
+def _offset_summary(matched_pred, matched_expert, limit=5):
+    # Show the most common timing offsets. This catches cases that look correct
+    # visually but miss the 5-sample tolerance by a few samples.
+    if len(matched_pred) == 0:
+        return ""
+
+    offsets = np.asarray(matched_pred, dtype=int) - np.asarray(matched_expert, dtype=int)
+    values, counts = np.unique(offsets, return_counts=True)
+    order = np.argsort(counts)[::-1][:limit]
+    return ", ".join(f"{int(values[i]):+d}:{int(counts[i])}" for i in order)
+
+
+def _fp_cluster_summary(unmatched_pred, fs=DEFAULT_FS, max_gap_sec=2.0, min_count=3, limit=3):
+    # Group false positives that happen close together. Large clusters usually
+    # mean a noisy segment, not isolated threshold mistakes.
+    peaks = np.asarray(unmatched_pred, dtype=int)
+    if len(peaks) == 0:
+        return ""
+
+    peaks.sort()
+    max_gap = int(max_gap_sec * fs)
+    clusters = []
+    start = int(peaks[0])
+    last = int(peaks[0])
+    count = 1
+
+    for peak in peaks[1:]:
+        peak = int(peak)
+        if peak - last <= max_gap:
+            last = peak
+            count += 1
+        else:
+            if count >= min_count:
+                clusters.append((count, start, last))
+            start = peak
+            last = peak
+            count = 1
+
+    if count >= min_count:
+        clusters.append((count, start, last))
+
+    clusters.sort(reverse=True)
+    clusters = clusters[:limit]
+    return "; ".join(
+        f"{start / fs:.1f}-{end / fs:.1f}s(n={count})"
+        for count, start, end in clusters
+    )
+
+
 def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=True):
+    # Evaluate every training record against QRSexpert. This does not generate
+    # a test submission and does not call the HRV code.
     data = loadmat(mat_path)
     ecg_records = data["ECG"].ravel()
     expert_records = data["QRSexpert"].ravel()
@@ -100,6 +156,8 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
         _filtered, predicted = detect_qrs(raw, DEFAULT_FS)
         metrics = match_qrs(predicted, expert, tolerance)
 
+        # Keep aggregate counts separate from per-record rows so summary metrics
+        # are computed from all beats, not from averaged record scores.
         for key in totals:
             totals[key] += metrics[key]
 
@@ -121,6 +179,8 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
             "pred_count": len(predicted),
             "expert_count": len(expert),
             "first_error_sample": first_error,
+            "offset_summary": _offset_summary(metrics["matched_pred"], metrics["matched_expert"]),
+            "fp_clusters": _fp_cluster_summary(metrics["unmatched_pred"]),
         }
         rows.append(row)
 
@@ -133,6 +193,12 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
                 f"TP={row['TP']} FP={row['FP']} FN={row['FN']} "
                 f"pred={row['pred_count']} expert={row['expert_count']}"
             )
+            if row["offset_summary"] and (
+                row["F1"] < 0.995 or record_number in (2, 6, 7, 10, 22, 25, 27, 35)
+            ):
+                print(f"  offsets pred-expert: {row['offset_summary']}")
+            if row["fp_clusters"] and (row["F1"] < 0.995 or row["FP"] >= 50):
+                print(f"  FP clusters: {row['fp_clusters']}")
 
     total_sens = totals["TP"] / (totals["TP"] + totals["FN"])
     total_ppv = totals["TP"] / (totals["TP"] + totals["FP"])
@@ -158,6 +224,8 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
 
 
 def save_metrics_csv(rows, summary, out_dir):
+    # Save the numeric result table so bad records can be sorted and inspected
+    # outside the terminal.
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "training_metrics.csv"
@@ -173,6 +241,8 @@ def save_metrics_csv(rows, summary, out_dir):
         "pred_count",
         "expert_count",
         "first_error_sample",
+        "offset_summary",
+        "fp_clusters",
     ]
     with csv_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -199,6 +269,7 @@ def save_metrics_csv(rows, summary, out_dir):
 
 
 def plot_f1_by_record(rows, out_dir):
+    # Quick visual check for records that still need manual inspection.
     import matplotlib
 
     matplotlib.use("Agg", force=True)
@@ -226,6 +297,7 @@ def plot_f1_by_record(rows, out_dir):
 
 
 def plot_sensitivity_ppv(rows, out_dir):
+    # Separate low-sensitivity problems from low-PPV problems.
     import matplotlib
 
     matplotlib.use("Agg", force=True)
@@ -254,6 +326,8 @@ def plot_sensitivity_ppv(rows, out_dir):
 
 
 def save_worst_overlays(mat_path, rows, out_dir, worst_count=4, length=15_000):
+    # Export static overlays for the lowest-F1 records. The interactive viewer
+    # is better for debugging, but these files are useful for reports.
     data = loadmat(mat_path)
     ecg_records = data["ECG"].ravel()
     expert_records = data["QRSexpert"].ravel()
@@ -286,8 +360,10 @@ def save_worst_overlays(mat_path, rows, out_dir, worst_count=4, length=15_000):
 
 
 def save_training_plots(mat_path, rows, summary, out_dir, worst_count=4):
+    # Save all evaluation artifacts in one folder so source files stay clean.
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(out_dir / ".matplotlib"))
 
     outputs = []
     outputs.extend(save_metrics_csv(rows, summary, out_dir))
@@ -298,6 +374,8 @@ def save_training_plots(mat_path, rows, summary, out_dir, worst_count=4):
 
 
 def main():
+    # CLI entry point. --viz opens the interactive viewer; otherwise the script
+    # runs training-set evaluation.
     parser = argparse.ArgumentParser(description="QRS training evaluation and visualization")
     parser.add_argument("--eval-train", action="store_true", help="run full training-set QRS evaluation")
     parser.add_argument("--save-plots", action="store_true", help="save CSV, metrics plots, and worst overlays")
