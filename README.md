@@ -12,7 +12,7 @@ This repository is for the BMET3997 major project ECG work. The current code foc
 
 ## Current QRS Method
 
-The detector is a simple student-style implementation inspired by Pan-Tompkins style processing:
+The detector is inspired by Pan-Tompkins style processing:
 
 1. Apply a 50 Hz notch filter.
 2. Apply a broad ECG bandpass filter for final peak placement.
@@ -101,7 +101,7 @@ The weakest record is currently record 25, mainly because it still has many fals
 
 ## Interactive Overlay Viewer
 
-Open a record in an interactive matplotlib debug viewer:
+Open a record in an interactive matplotlib viewer:
 
 ```bash
 python3 test.py --viz --patient 12 --start 0 --length 15000
@@ -109,36 +109,23 @@ python3 test.py --viz --patient 12 --start 0 --length 15000
 
 `--patient` is a 1-based record number, so `--patient 12` means training record 12.
 
-The viewer is implemented in `qrs_debug_viewer.py`. It draws one time-aligned figure with:
-
-- raw ECG,
-- filtered ECG,
-- `abs(filtered ECG)`,
-- main amplitude threshold,
-- integrated QRS energy,
-- energy threshold,
-- predicted QRS peaks,
-- expert QRS peaks,
-- optional main and energy candidate peaks.
-
-The right-side layer panel can hide/show each item independently. The `Hide controls` / `Show controls` button collapses or expands that panel. The `Start` and `Window` sliders control the displayed sample range, the mouse wheel zooms horizontally around the cursor, and `Prev record` / `Next record` plus `n/right` and `p/left` switch records.
-
 Useful flags:
 
-| Flag | Meaning |
-| --- | --- |
-| `--mat PATH` | `.mat` file to load. Defaults to `dataSet/ProjectTrainData.mat`. |
-| `--patient N` | 1-based record number. |
-| `--start N` | First sample shown in the viewer. |
-| `--length N` | Number of samples shown. |
-| `--show-raw` | Also draw raw ECG behind the filtered ECG. |
-| `--max-len N` | Crop each record for quick debugging. |
+
+| Flag          | Meaning                                                          |
+| ------------- | ---------------------------------------------------------------- |
+| `--mat PATH`  | `.mat` file to load. Defaults to `dataSet/ProjectTrainData.mat`. |
+| `--patient N` | 1-based record number.                                           |
+| `--start N`   | First sample shown in the viewer.                                |
+| `--length N`  | Number of samples shown.                                         |
+| `--show-raw`  | Also draw raw ECG behind the filtered ECG.                       |
+| `--max-len N` | Crop each record for quick debugging.                            |
+
 
 ## Files
 
-- `qrs_pipeline.py`: ECG filtering, QRS detection, debug signal generation, missed-beat filling, and batch overlay plotting.
-- `qrs_debug_viewer.py`: interactive QRS debug viewer with layer toggles, sliders, record navigation, and scroll zoom.
-- `test.py`: command-line evaluation, saved analysis outputs, and `--viz` entry point.
+- `qrs_pipeline.py`: ECG filtering, QRS detection, missed-beat filling, and overlay plotting.
+- `test.py`: command-line evaluation and visualization outputs.
 - `README.md`: project summary and run instructions.
 
 ## Current Scope
@@ -149,3 +136,4 @@ This stage does not:
 - generate the final test-set submission `.mat`,
 - modify `hrvcalc.py`,
 - use any QRS detection toolbox/library.
+
