@@ -6,6 +6,7 @@ import numpy as np
 from scipy.io import loadmat
 from scipy.interpolate import interp1d
 from scipy.signal import periodogram
+from scipy.integrate import trapezoid
 
 from qrs_pipeline import (
     DEFAULT_FS,
@@ -18,6 +19,144 @@ from qrs_debug_viewer import run_qrs_debug_viewer
 PROJECT_TRAIN_DATA = default_train_mat()
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "outputs" / "qrs_eval"
 
+def clean_rr_intervals(rr_intervals,
+                       min_rr=0.3,
+                       max_rr=2.0,
+                       max_deviation=0.20):
+    """
+    Remove implausible RR intervals caused by missed or false QRS detections.
+
+    Parameters
+    ----------
+    rr_intervals : ndarray
+        RR intervals in seconds
+
+    min_rr : float
+        Minimum physiologic RR interval (seconds)
+
+    max_rr : float
+        Maximum physiologic RR interval (seconds)
+
+    max_deviation : float
+        Maximum allowed deviation from median RR
+        (0.20 = ±20%)
+    """
+
+    rr = np.asarray(rr_intervals, dtype=float)
+
+    if len(rr) < 3:
+        return rr
+
+    # --- physiologic range filter ---
+    valid = (rr >= min_rr) & (rr <= max_rr)
+    rr = rr[valid]
+
+    if len(rr) < 3:
+        return rr
+
+    # --- median-based artifact rejection ---
+    median_rr = np.median(rr)
+
+    valid = (
+        (rr >= median_rr * (1.0 - max_deviation)) &
+        (rr <= median_rr * (1.0 + max_deviation))
+    )
+
+    rr = rr[valid]
+
+    return rr
+
+
+def _estimate_lf_hf_power(
+        rr_intervals,
+        min_f_LF=0.04,
+        max_f_LF=0.15,
+        min_f_HF=0.15,
+        max_f_HF=0.4,
+        fs_resample=4.0):
+    """
+    Standard HRV LF/HF estimation with RR cleaning.
+
+    Steps:
+      1. Remove RR artifacts
+      2. Create RR timestamps
+      3. Cubic interpolation to uniform sampling
+      4. Mean detrend
+      5. Periodogram PSD
+      6. Integrate LF/HF bands
+    """
+
+    # ------------------------------------------------------------------
+    # CLEAN RR INTERVALS
+    # ------------------------------------------------------------------
+    rr_intervals = clean_rr_intervals(rr_intervals)
+
+    if len(rr_intervals) < 4:
+        return 0.0, 0.0
+
+    # ------------------------------------------------------------------
+    # RR timestamps
+    # ------------------------------------------------------------------
+    time_stamps = np.concatenate([[0.0], np.cumsum(rr_intervals[:-1])])
+
+    rr_ms = rr_intervals * 1000.0
+
+    # ------------------------------------------------------------------
+    # Uniform interpolation (4 Hz standard HRV)
+    # ------------------------------------------------------------------
+    t_uniform = np.arange(
+        time_stamps[0],
+        time_stamps[-1],
+        1.0 / fs_resample
+    )
+
+    if len(t_uniform) < 8:
+        return 0.0, 0.0
+
+    interpolator = interp1d(
+        time_stamps,
+        rr_ms,
+        kind="cubic",
+        bounds_error=False,
+        fill_value="extrapolate"
+    )
+
+    rr_resampled = interpolator(t_uniform)
+
+
+    rr_resampled = rr_resampled - np.mean(rr_resampled)
+
+    freqs, psd = periodogram(
+        rr_resampled,
+        fs=fs_resample,
+        scaling="density"
+    )
+
+    # ------------------------------------------------------------------
+    # LF/HF bands
+    # ------------------------------------------------------------------
+    lf_mask = (
+        (freqs >= min_f_LF) &
+        (freqs < max_f_LF)
+    )
+
+    hf_mask = (
+        (freqs >= min_f_HF) &
+        (freqs <= max_f_HF)
+    )
+
+    LF_power = (
+        float(trapezoid(psd[lf_mask], freqs[lf_mask]))
+        if np.any(lf_mask) else 0.0
+    )
+
+    HF_power = (
+        float(trapezoid(psd[hf_mask], freqs[hf_mask]))
+        if np.any(hf_mask) else 0.0
+    )
+
+    return LF_power, HF_power
+
 
 def _compute_rr_intervals(peaks, fs=DEFAULT_FS):
     peaks = np.asarray(peaks, dtype=float)
@@ -26,11 +165,11 @@ def _compute_rr_intervals(peaks, fs=DEFAULT_FS):
     return np.diff(peaks) / fs
 
 
-def _estimate_lf_hf_power(rr_intervals, min_f_LF=0.04, max_f_LF=0.15, max_f_HF=0.4, fs_resample=4.0):
+def _estimate_lf_hf_power(rr_intervals, min_f_LF=0.04, max_f_LF=0.15, max_f_HF=0.4, fs_resample=100.0):
     """
     Standard HRV frequency-domain method (matches pyHRV / hrvanalysis):
       1. Place RR timestamps starting at t=0
-      2. Cubic-spline interpolate onto a uniform 4 Hz grid
+      2. Cubic-spline interpolate onto a uniform 100 Hz grid
       3. Detrend by subtracting the mean
       4. Compute PSD via periodogram (single FFT, no windowing/segmenting)
          so frequency resolution = fs_resample / N_resampled — fine enough
@@ -44,7 +183,7 @@ def _estimate_lf_hf_power(rr_intervals, min_f_LF=0.04, max_f_LF=0.15, max_f_HF=0
     time_stamps = np.concatenate([[0.0], np.cumsum(rr_intervals[:-1])])
     rr_ms = rr_intervals * 1000.0
 
-    # --- 2. cubic-spline interpolation onto uniform 4 Hz grid ---
+    # --- 2. cubic-spline interpolation onto uniform 100 Hz grid ---
     t_uniform = np.arange(time_stamps[0], time_stamps[-1], 1.0 / fs_resample)
     if len(t_uniform) < 8:
         return 0.0, 0.0
@@ -64,14 +203,15 @@ def _estimate_lf_hf_power(rr_intervals, min_f_LF=0.04, max_f_LF=0.15, max_f_HF=0
     lf_mask = (freqs >= min_f_LF) & (freqs <= max_f_LF)
     hf_mask = (freqs >= max_f_LF) & (freqs <= max_f_HF)
 
-    LF_power = float(np.trapz(psd[lf_mask], freqs[lf_mask])) if lf_mask.any() else 0.0
-    HF_power = float(np.trapz(psd[hf_mask], freqs[hf_mask])) if hf_mask.any() else 0.0
+    LF_power = float(trapezoid(psd[lf_mask], freqs[lf_mask])) if lf_mask.any() else 0.0
+    HF_power = float(trapezoid(psd[hf_mask], freqs[hf_mask])) if hf_mask.any() else 0.0
 
     return LF_power, HF_power
 
 
 def calculate_hr_hrv(peaks, detailed=False):
-    rr = _compute_rr_intervals(peaks)
+    rr_raw = _compute_rr_intervals(peaks)
+    rr = clean_rr_intervals(rr_raw)
     if len(rr) < 1:
         return (0.0, 0.0) if not detailed else {
             "HR": 0.0,
@@ -159,7 +299,13 @@ def match_qrs(predicted, expert, tolerance_samples=5):
 
 
 def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=True):
-    data = loadmat(mat_path)
+    try:
+        data = loadmat(mat_path)
+    except OSError:
+        print(f"Error: The file '{mat_path}' was not found.")
+        print("Please ensure the dataSet folder with ProjectTrainData.mat is present in the project directory.")
+        print("Refer to the README.md for the expected data layout.")
+        return [], {}
     ecg_records = data["ECG"].ravel()
     expert_records = data["QRSexpert"].ravel()
     tolerance = int(0.050 * DEFAULT_FS)
@@ -178,7 +324,8 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
         _filtered, predicted = detect_qrs(raw, DEFAULT_FS)
         metrics = match_qrs(predicted, expert, tolerance)
 
-        rr = _compute_rr_intervals(predicted)
+        rr_raw = _compute_rr_intervals(predicted)
+        rr = clean_rr_intervals(rr_raw)
         rr_ms = rr * 1000.0
 
         avr_rr_int = float(np.mean(rr_ms)) if len(rr) else 0.0
