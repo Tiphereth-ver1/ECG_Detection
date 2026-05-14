@@ -19,144 +19,6 @@ from qrs_debug_viewer import run_qrs_debug_viewer
 PROJECT_TRAIN_DATA = default_train_mat()
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "outputs" / "qrs_eval"
 
-def clean_rr_intervals(rr_intervals,
-                       min_rr=0.3,
-                       max_rr=2.0,
-                       max_deviation=0.20):
-    """
-    Remove implausible RR intervals caused by missed or false QRS detections.
-
-    Parameters
-    ----------
-    rr_intervals : ndarray
-        RR intervals in seconds
-
-    min_rr : float
-        Minimum physiologic RR interval (seconds)
-
-    max_rr : float
-        Maximum physiologic RR interval (seconds)
-
-    max_deviation : float
-        Maximum allowed deviation from median RR
-        (0.20 = ±20%)
-    """
-
-    rr = np.asarray(rr_intervals, dtype=float)
-
-    if len(rr) < 3:
-        return rr
-
-    # --- physiologic range filter ---
-    valid = (rr >= min_rr) & (rr <= max_rr)
-    rr = rr[valid]
-
-    if len(rr) < 3:
-        return rr
-
-    # --- median-based artifact rejection ---
-    median_rr = np.median(rr)
-
-    valid = (
-        (rr >= median_rr * (1.0 - max_deviation)) &
-        (rr <= median_rr * (1.0 + max_deviation))
-    )
-
-    rr = rr[valid]
-
-    return rr
-
-
-def _estimate_lf_hf_power(
-        rr_intervals,
-        min_f_LF=0.04,
-        max_f_LF=0.15,
-        min_f_HF=0.15,
-        max_f_HF=0.4,
-        fs_resample=4.0):
-    """
-    Standard HRV LF/HF estimation with RR cleaning.
-
-    Steps:
-      1. Remove RR artifacts
-      2. Create RR timestamps
-      3. Cubic interpolation to uniform sampling
-      4. Mean detrend
-      5. Periodogram PSD
-      6. Integrate LF/HF bands
-    """
-
-    # ------------------------------------------------------------------
-    # CLEAN RR INTERVALS
-    # ------------------------------------------------------------------
-    rr_intervals = clean_rr_intervals(rr_intervals)
-
-    if len(rr_intervals) < 4:
-        return 0.0, 0.0
-
-    # ------------------------------------------------------------------
-    # RR timestamps
-    # ------------------------------------------------------------------
-    time_stamps = np.concatenate([[0.0], np.cumsum(rr_intervals[:-1])])
-
-    rr_ms = rr_intervals * 1000.0
-
-    # ------------------------------------------------------------------
-    # Uniform interpolation (4 Hz standard HRV)
-    # ------------------------------------------------------------------
-    t_uniform = np.arange(
-        time_stamps[0],
-        time_stamps[-1],
-        1.0 / fs_resample
-    )
-
-    if len(t_uniform) < 8:
-        return 0.0, 0.0
-
-    interpolator = interp1d(
-        time_stamps,
-        rr_ms,
-        kind="cubic",
-        bounds_error=False,
-        fill_value="extrapolate"
-    )
-
-    rr_resampled = interpolator(t_uniform)
-
-
-    rr_resampled = rr_resampled - np.mean(rr_resampled)
-
-    freqs, psd = periodogram(
-        rr_resampled,
-        fs=fs_resample,
-        scaling="density"
-    )
-
-    # ------------------------------------------------------------------
-    # LF/HF bands
-    # ------------------------------------------------------------------
-    lf_mask = (
-        (freqs >= min_f_LF) &
-        (freqs < max_f_LF)
-    )
-
-    hf_mask = (
-        (freqs >= min_f_HF) &
-        (freqs <= max_f_HF)
-    )
-
-    LF_power = (
-        float(trapezoid(psd[lf_mask], freqs[lf_mask]))
-        if np.any(lf_mask) else 0.0
-    )
-
-    HF_power = (
-        float(trapezoid(psd[hf_mask], freqs[hf_mask]))
-        if np.any(hf_mask) else 0.0
-    )
-
-    return LF_power, HF_power
-
 
 def _compute_rr_intervals(peaks, fs=DEFAULT_FS):
     peaks = np.asarray(peaks, dtype=float)
@@ -165,16 +27,27 @@ def _compute_rr_intervals(peaks, fs=DEFAULT_FS):
     return np.diff(peaks) / fs
 
 
-def _estimate_lf_hf_power(rr_intervals, min_f_LF=0.04, max_f_LF=0.15, max_f_HF=0.4, fs_resample=100.0):
+def clean_rr_intervals(rr, min_rr=0.3, max_rr=2.0):
+    rr = np.asarray(rr)
+    return rr[(rr >= min_rr) & (rr <= max_rr)]
+
+def _estimate_lf_hf_power(
+        rr_intervals,
+        min_f_LF=0.04,
+        max_f_LF=0.15,
+        max_f_HF=0.4,
+        fs_resample=100):
     """
-    Standard HRV frequency-domain method (matches pyHRV / hrvanalysis):
-      1. Place RR timestamps starting at t=0
-      2. Cubic-spline interpolate onto a uniform 100 Hz grid
-      3. Detrend by subtracting the mean
-      4. Compute PSD via periodogram (single FFT, no windowing/segmenting)
-         so frequency resolution = fs_resample / N_resampled — fine enough
-         to resolve the narrow HF band even for short recordings
-      5. Integrate LF and HF bands with the trapezoid rule
+    Standard HRV frequency-domain estimation:
+      1. RR timestamps starting at t=0
+      2. Cubic-spline interpolation onto a uniform 100 Hz grid
+      3. Mean detrend
+      4. Periodogram PSD (single full-length FFT, no segmenting)
+      5. Trapezoid integration over LF (0.04-0.15 Hz) and HF (0.15-0.4 Hz)
+
+    No RR cleaning is applied here — the QRS detector is already high-accuracy
+    (F1 >= 0.99 on most records), and aggressive cleaning distorts power on
+    high-HRV records like record 29 (sdRR ~206 ms).
     """
     if len(rr_intervals) < 2:
         return 0.0, 0.0
@@ -188,20 +61,24 @@ def _estimate_lf_hf_power(rr_intervals, min_f_LF=0.04, max_f_LF=0.15, max_f_HF=0
     if len(t_uniform) < 8:
         return 0.0, 0.0
 
-    interpolator = interp1d(time_stamps, rr_ms, kind="cubic",
-                            bounds_error=False,
-                            fill_value=(rr_ms[0], rr_ms[-1]))
+    interpolator = interp1d(
+        time_stamps,
+        rr_ms,
+        kind="cubic",
+        bounds_error=False,
+        fill_value=(rr_ms[0], rr_ms[-1]),
+    )
     rr_resampled = interpolator(t_uniform)
 
-    # --- 3. detrend ---
+    # --- 3. mean detrend ---
     rr_resampled -= np.mean(rr_resampled)
 
-    # --- 4. periodogram with full-length FFT (no Welch segmenting) ---
+    # --- 4. periodogram (full-length FFT, no Welch segmenting) ---
     freqs, psd = periodogram(rr_resampled, fs=fs_resample, scaling="density")
 
     # --- 5. band integration ---
     lf_mask = (freqs >= min_f_LF) & (freqs <= max_f_LF)
-    hf_mask = (freqs >= max_f_LF) & (freqs <= max_f_HF)
+    hf_mask = (freqs > max_f_LF) & (freqs <= max_f_HF)
 
     LF_power = float(trapezoid(psd[lf_mask], freqs[lf_mask])) if lf_mask.any() else 0.0
     HF_power = float(trapezoid(psd[hf_mask], freqs[hf_mask])) if hf_mask.any() else 0.0
@@ -210,8 +87,9 @@ def _estimate_lf_hf_power(rr_intervals, min_f_LF=0.04, max_f_LF=0.15, max_f_HF=0
 
 
 def calculate_hr_hrv(peaks, detailed=False):
-    rr_raw = _compute_rr_intervals(peaks)
-    rr = clean_rr_intervals(rr_raw)
+    rr = clean_rr_intervals(
+    _compute_rr_intervals(predicted)
+)
     if len(rr) < 1:
         return (0.0, 0.0) if not detailed else {
             "HR": 0.0,
@@ -303,9 +181,9 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
         data = loadmat(mat_path)
     except OSError:
         print(f"Error: The file '{mat_path}' was not found.")
-        print("Please ensure the dataSet folder with ProjectTrainData.mat is present in the project directory.")
-        print("Refer to the README.md for the expected data layout.")
+        print("Please ensure the dataSet folder with ProjectTrainData.mat is present.")
         return [], {}
+
     ecg_records = data["ECG"].ravel()
     expert_records = data["QRSexpert"].ravel()
     tolerance = int(0.050 * DEFAULT_FS)
@@ -324,16 +202,18 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
         _filtered, predicted = detect_qrs(raw, DEFAULT_FS)
         metrics = match_qrs(predicted, expert, tolerance)
 
-        rr_raw = _compute_rr_intervals(predicted)
-        rr = clean_rr_intervals(rr_raw)
+        rr = clean_rr_intervals(
+    _compute_rr_intervals(predicted)
+)
         rr_ms = rr * 1000.0
 
-        avr_rr_int = float(np.mean(rr_ms)) if len(rr) else 0.0
-        stdev_rr_int = float(np.std(rr_ms, ddof=1)) if len(rr) > 1 else 0.0
-        rmssd = float(np.sqrt(np.mean(np.diff(rr_ms) ** 2))) if len(rr) > 1 else 0.0
-        pnn50 = float(np.sum(np.abs(np.diff(rr)) > 0.05) / max(1, len(rr) - 1) * 100.0) if len(rr) > 1 else 0.0
+        avr_rr_int    = float(np.mean(rr_ms))                                        if len(rr) >= 1 else 0.0
+        stdev_rr_int  = float(np.std(rr_ms, ddof=1))                                 if len(rr) >  1 else 0.0
+        rmssd         = float(np.sqrt(np.mean(np.diff(rr_ms) ** 2)))                 if len(rr) >  1 else 0.0
+        pnn50         = float(np.sum(np.abs(np.diff(rr)) > 0.05)
+                              / max(1, len(rr) - 1) * 100.0)                         if len(rr) >  1 else 0.0
         LF_power, HF_power = _estimate_lf_hf_power(rr)
-        LF_HF_ratio = float(LF_power / HF_power) if HF_power else 0.0
+        LF_HF_ratio   = float(LF_power / HF_power)                                   if HF_power else 0.0
 
         print(f"avgRR={avr_rr_int:.6f} ms")
         print(f"sdRR={stdev_rr_int:.6f} ms")
@@ -354,15 +234,15 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
             first_error = int(metrics["unmatched_pred"][0])
 
         row = {
-            "record": record_number,
-            "TP": metrics["TP"],
-            "FP": metrics["FP"],
-            "FN": metrics["FN"],
-            "Sensitivity": metrics["Sensitivity"],
-            "PPV": metrics["PPV"],
-            "F1": metrics["F1"],
-            "pred_count": len(predicted),
-            "expert_count": len(expert),
+            "record":            record_number,
+            "TP":                metrics["TP"],
+            "FP":                metrics["FP"],
+            "FN":                metrics["FN"],
+            "Sensitivity":       metrics["Sensitivity"],
+            "PPV":               metrics["PPV"],
+            "F1":                metrics["F1"],
+            "pred_count":        len(predicted),
+            "expert_count":      len(expert),
             "first_error_sample": first_error,
         }
         rows.append(row)
@@ -378,15 +258,15 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
             )
 
     total_sens = totals["TP"] / (totals["TP"] + totals["FN"])
-    total_ppv = totals["TP"] / (totals["TP"] + totals["FP"])
-    total_f1 = 2 * total_sens * total_ppv / (total_sens + total_ppv)
+    total_ppv  = totals["TP"] / (totals["TP"] + totals["FP"])
+    total_f1   = 2 * total_sens * total_ppv / (total_sens + total_ppv)
     summary = {
-        "TP": totals["TP"],
-        "FP": totals["FP"],
-        "FN": totals["FN"],
+        "TP":          totals["TP"],
+        "FP":          totals["FP"],
+        "FN":          totals["FN"],
         "Sensitivity": total_sens,
-        "PPV": total_ppv,
-        "F1": total_f1,
+        "PPV":         total_ppv,
+        "F1":          total_f1,
     }
 
     print(
@@ -422,11 +302,11 @@ def save_metrics_csv(rows, summary, out_dir):
     summary_path.write_text(
         "\n".join([
             f"Sensitivity: {summary['Sensitivity']:.6f}",
-            f"PPV: {summary['PPV']:.6f}",
-            f"F1: {summary['F1']:.6f}",
-            f"TP: {summary['TP']}",
-            f"FP: {summary['FP']}",
-            f"FN: {summary['FN']}",
+            f"PPV:         {summary['PPV']:.6f}",
+            f"F1:          {summary['F1']:.6f}",
+            f"TP:          {summary['TP']}",
+            f"FP:          {summary['FP']}",
+            f"FN:          {summary['FN']}",
         ]) + "\n"
     )
 
@@ -440,7 +320,7 @@ def plot_f1_by_record(rows, out_dir):
 
     out_path = Path(out_dir) / "f1_by_record.png"
     records = [row["record"] for row in rows]
-    f1 = [row["F1"] for row in rows]
+    f1      = [row["F1"]     for row in rows]
 
     plt.figure(figsize=(13, 4.8))
     colors = ["tab:red" if v < 0.95 else "tab:blue" for v in f1]
@@ -465,9 +345,9 @@ def plot_sensitivity_ppv(rows, out_dir):
     import matplotlib.pyplot as plt
 
     out_path = Path(out_dir) / "sensitivity_vs_ppv.png"
-    sens = [row["Sensitivity"] for row in rows]
-    ppv = [row["PPV"] for row in rows]
-    records = [row["record"] for row in rows]
+    sens    = [row["Sensitivity"] for row in rows]
+    ppv     = [row["PPV"]         for row in rows]
+    records = [row["record"]      for row in rows]
 
     plt.figure(figsize=(6, 6))
     plt.scatter(ppv, sens, s=45, color="tab:blue")
@@ -488,20 +368,20 @@ def plot_sensitivity_ppv(rows, out_dir):
 
 def save_worst_overlays(mat_path, rows, out_dir, worst_count=4, length=15_000):
     data = loadmat(mat_path)
-    ecg_records = data["ECG"].ravel()
+    ecg_records    = data["ECG"].ravel()
     expert_records = data["QRSexpert"].ravel()
     out_paths = []
 
     worst = sorted(rows, key=lambda row: row["F1"])[:worst_count]
     for row in worst:
         record_number = row["record"]
-        raw = ecg_records[record_number - 1].ravel().astype(float)
+        raw    = ecg_records[record_number - 1].ravel().astype(float)
         expert = expert_records[record_number - 1].ravel().astype(int) - 1
         expert = expert[(expert >= 0) & (expert < len(raw))]
         filtered, predicted = detect_qrs(raw, DEFAULT_FS)
 
-        center = row["first_error_sample"]
-        start = 0 if center is None else max(0, int(center) - length // 2)
+        center   = row["first_error_sample"]
+        start    = 0 if center is None else max(0, int(center) - length // 2)
         out_path = Path(out_dir) / f"record_{record_number:02d}_overlay.png"
         save_overlay_plot(
             raw=raw,
@@ -532,17 +412,17 @@ def save_training_plots(mat_path, rows, summary, out_dir, worst_count=4):
 
 def main():
     parser = argparse.ArgumentParser(description="QRS training evaluation and visualization")
-    parser.add_argument("--eval-train", action="store_true", help="run full training-set QRS evaluation")
-    parser.add_argument("--save-plots", action="store_true", help="save CSV, metrics plots, and worst overlays")
-    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--mat", type=Path, default=PROJECT_TRAIN_DATA)
-    parser.add_argument("--max-len", type=int, default=None, help="optional crop for quick experiments")
-    parser.add_argument("--worst-count", type=int, default=4)
-    parser.add_argument("--viz", action="store_true", help="open interactive overlay viewer")
-    parser.add_argument("--patient", type=int, default=1, help="1-based record number for --viz")
-    parser.add_argument("--start", type=int, default=0)
-    parser.add_argument("--length", type=int, default=15_000)
-    parser.add_argument("--show-raw", action="store_true")
+    parser.add_argument("--eval-train",   action="store_true", help="run full training-set QRS evaluation")
+    parser.add_argument("--save-plots",   action="store_true", help="save CSV, metrics plots, and worst overlays")
+    parser.add_argument("--out-dir",      type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--mat",          type=Path, default=PROJECT_TRAIN_DATA)
+    parser.add_argument("--max-len",      type=int,  default=None, help="optional crop for quick experiments")
+    parser.add_argument("--worst-count",  type=int,  default=4)
+    parser.add_argument("--viz",          action="store_true", help="open interactive overlay viewer")
+    parser.add_argument("--patient",      type=int,  default=1, help="1-based record number for --viz")
+    parser.add_argument("--start",        type=int,  default=0)
+    parser.add_argument("--length",       type=int,  default=15_000)
+    parser.add_argument("--show-raw",     action="store_true")
     args = parser.parse_args()
 
     if args.viz:
@@ -568,7 +448,7 @@ def main():
             )
             print("\nSaved outputs:")
             for path in outputs:
-                print(f"- {path}")
+                print(f"  {path}")
 
 
 if __name__ == "__main__":
