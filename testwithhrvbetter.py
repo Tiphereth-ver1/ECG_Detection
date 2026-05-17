@@ -5,8 +5,7 @@ from pathlib import Path
 import numpy as np
 from scipy.io import loadmat
 from scipy.interpolate import interp1d
-from scipy.signal import periodogram
-from scipy.integrate import trapezoid
+from scipy.signal import welch
 
 from qrs_pipeline import (
     DEFAULT_FS,
@@ -20,7 +19,12 @@ PROJECT_TRAIN_DATA = default_train_mat()
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "outputs" / "qrs_eval"
 
 
+# =============================================================================
+# RR INTERVAL UTILITIES
+# =============================================================================
+
 def _compute_rr_intervals(peaks, fs=DEFAULT_FS):
+    """Convert R-peak sample indices → RR intervals in seconds."""
     peaks = np.asarray(peaks, dtype=float)
     if len(peaks) < 2:
         return np.asarray([], dtype=float)
@@ -28,35 +32,58 @@ def _compute_rr_intervals(peaks, fs=DEFAULT_FS):
 
 
 def clean_rr_intervals(rr, min_rr=0.3, max_rr=2.0):
-    rr = np.asarray(rr)
+    """
+    Remove physiologically implausible RR intervals.
+    Input in seconds: 0.3–2.0 s = 30–200 bpm.
+    Also removes large gaps caused by noise removal in the QRS detector.
+    """
+    rr = np.asarray(rr, dtype=float)
     return rr[(rr >= min_rr) & (rr <= max_rr)]
 
-def _estimate_lf_hf_power(
-        rr_intervals,
-        min_f_LF=0.04,
-        max_f_LF=0.15,
-        max_f_HF=0.4,
-        fs_resample=100):
-    """
-    Standard HRV frequency-domain estimation:
-      1. RR timestamps starting at t=0
-      2. Cubic-spline interpolation onto a uniform 100 Hz grid
-      3. Mean detrend
-      4. Periodogram PSD (single full-length FFT, no segmenting)
-      5. Trapezoid integration over LF (0.04-0.15 Hz) and HF (0.15-0.4 Hz)
 
-    No RR cleaning is applied here — the QRS detector is already high-accuracy
-    (F1 >= 0.99 on most records), and aggressive cleaning distorts power on
-    high-HRV records like record 29 (sdRR ~206 ms).
+# =============================================================================
+# LF / HF POWER
+# =============================================================================
+
+def _estimate_lf_hf_power(rr_intervals,
+                           min_f_LF=0.04,
+                           max_f_LF=0.15,
+                           max_f_HF=0.40,
+                           fs_resample=4.0):
     """
-    if len(rr_intervals) < 2:
+    Estimate LF and HF spectral power from RR intervals (in seconds).
+
+    Pipeline:
+      1. Convert RR to milliseconds
+      2. Build timestamps starting at t=0 (seconds)
+      3. Cubic-spline interpolate onto uniform 4 Hz grid
+      4. Subtract mean (remove DC)
+      5. Welch PSD with nperseg=full signal length
+         → identical to a periodogram, maximum frequency resolution,
+           no segment-averaging that would smear narrow HF band
+      6. Trapezoid-integrate LF (0.04-0.15 Hz) and HF (0.15-0.40 Hz)
+
+    Parameters
+    ----------
+    rr_intervals : array of RR intervals in **seconds** (already cleaned)
+
+    Returns
+    -------
+    LF_power, HF_power : floats in ms²
+    """
+    rr_intervals = np.asarray(rr_intervals, dtype=float)
+
+    if len(rr_intervals) < 10:
         return 0.0, 0.0
 
-    # --- 1. timestamps starting at 0 ---
-    time_stamps = np.concatenate([[0.0], np.cumsum(rr_intervals[:-1])])
+    # 1. convert to ms
     rr_ms = rr_intervals * 1000.0
 
-    # --- 2. cubic-spline interpolation onto uniform 100 Hz grid ---
+    # 2. timestamps in seconds, starting at 0
+    #    t[0]=0, t[1]=rr[0]/1000, t[2]=(rr[0]+rr[1])/1000, ...
+    time_stamps = np.concatenate([[0.0], np.cumsum(rr_ms[:-1])]) / 1000.0
+
+    # 3. uniform 4 Hz grid
     t_uniform = np.arange(time_stamps[0], time_stamps[-1], 1.0 / fs_resample)
     if len(t_uniform) < 8:
         return 0.0, 0.0
@@ -70,84 +97,90 @@ def _estimate_lf_hf_power(
     )
     rr_resampled = interpolator(t_uniform)
 
-    # --- 3. mean detrend ---
-    rr_resampled -= np.mean(rr_resampled)
+    # 4. remove DC
+    rr_resampled -= rr_resampled.mean()
 
-    # --- 4. periodogram (full-length FFT, no Welch segmenting) ---
-    freqs, psd = periodogram(rr_resampled, fs=fs_resample, scaling="density")
+    # 5. Welch with nperseg=full length → periodogram, maximum resolution
+    #    scaling="density" → units ms²/Hz; integration → ms²
+    nperseg = len(rr_resampled)
+    freqs, psd = welch(rr_resampled, fs=fs_resample,
+                       nperseg=nperseg, scaling="density")
 
-    # --- 5. band integration ---
+    # 6. integrate bands
     lf_mask = (freqs >= min_f_LF) & (freqs <= max_f_LF)
-    hf_mask = (freqs > max_f_LF) & (freqs <= max_f_HF)
+    hf_mask = (freqs >= max_f_LF) & (freqs <= max_f_HF)
 
-    LF_power = float(trapezoid(psd[lf_mask], freqs[lf_mask])) if lf_mask.any() else 0.0
-    HF_power = float(trapezoid(psd[hf_mask], freqs[hf_mask])) if hf_mask.any() else 0.0
+    LF_power = float(np.trapezoid(psd[lf_mask], freqs[lf_mask])) if lf_mask.any() else 0.0
+    HF_power = float(np.trapezoid(psd[hf_mask], freqs[hf_mask])) if hf_mask.any() else 0.0
 
     return LF_power, HF_power
 
 
+# =============================================================================
+# HR + HRV
+# =============================================================================
+
 def calculate_hr_hrv(peaks, detailed=False):
-    rr = clean_rr_intervals(
-    _compute_rr_intervals(predicted)
-)
+    rr = clean_rr_intervals(_compute_rr_intervals(peaks))  # seconds, cleaned
+
     if len(rr) < 1:
         return (0.0, 0.0) if not detailed else {
-            "HR": 0.0,
-            "RMSSD": 0.0,
-            "SDNN": 0.0,
-            "pNN50": 0.0,
-            "LF_power": 0.0,
-            "HF_power": 0.0,
+            "HR": 0.0, "RMSSD": 0.0, "SDNN": 0.0,
+            "pNN50": 0.0, "LF_power": 0.0, "HF_power": 0.0,
         }
 
-    hr = 60.0 / np.mean(rr)
-    rr_ms = rr * 1000
+    hr    = 60.0 / np.mean(rr)
+    rr_ms = rr * 1000.0
     rmssd = float(np.sqrt(np.mean(np.diff(rr_ms) ** 2))) if len(rr_ms) > 1 else 0.0
 
     if not detailed:
         return float(hr), float(rmssd)
 
-    sdnn = float(np.std(rr_ms, ddof=1)) if len(rr) > 1 else 0.0
+    sdnn  = float(np.std(rr_ms, ddof=1)) if len(rr) > 1 else 0.0
     pnn50 = float(np.sum(np.abs(np.diff(rr)) > 0.05) / max(1, len(rr) - 1) * 100.0)
+
     lf_power, hf_power = _estimate_lf_hf_power(rr)
     lf_hf_ratio = float(lf_power / hf_power) if hf_power else 0.0
 
     return {
-        "HR": float(hr),
-        "RMSSD": float(rmssd),
-        "SDNN": sdnn,
-        "pNN50": pnn50,
-        "LF_power": lf_power,
-        "HF_power": hf_power,
+        "HR":          float(hr),
+        "RMSSD":       float(rmssd),
+        "SDNN":        sdnn,
+        "pNN50":       pnn50,
+        "LF_power":    lf_power,
+        "HF_power":    hf_power,
         "LF_HF_ratio": lf_hf_ratio,
     }
 
 
+# =============================================================================
+# QRS MATCHING
+# =============================================================================
+
 def match_qrs(predicted, expert, tolerance_samples=5):
     predicted = np.asarray(predicted, dtype=int)
-    expert = np.asarray(expert, dtype=int)
+    expert    = np.asarray(expert,    dtype=int)
 
     predicted.sort()
     expert.sort()
 
-    used = np.zeros(len(predicted), dtype=bool)
-    matched_pred = []
+    used           = np.zeros(len(predicted), dtype=bool)
+    matched_pred   = []
     matched_expert = []
-    search_start = 0
+    search_start   = 0
 
     for expert_peak in expert:
-        while search_start < len(predicted) and predicted[search_start] < expert_peak - tolerance_samples:
+        while (search_start < len(predicted)
+               and predicted[search_start] < expert_peak - tolerance_samples):
             search_start += 1
 
-        best_idx = -1
-        best_dist = tolerance_samples + 1
+        best_idx, best_dist = -1, tolerance_samples + 1
         idx = search_start
         while idx < len(predicted) and predicted[idx] <= expert_peak + tolerance_samples:
             if not used[idx]:
                 dist = abs(predicted[idx] - expert_peak)
                 if dist < best_dist:
-                    best_dist = dist
-                    best_idx = idx
+                    best_dist, best_idx = dist, idx
             idx += 1
 
         if best_idx >= 0:
@@ -160,21 +193,21 @@ def match_qrs(predicted, expert, tolerance_samples=5):
     fn = int(len(expert) - tp)
 
     sens = tp / (tp + fn) if tp + fn else 0.0
-    ppv = tp / (tp + fp) if tp + fp else 0.0
-    f1 = 2 * sens * ppv / (sens + ppv) if sens + ppv else 0.0
+    ppv  = tp / (tp + fp) if tp + fp else 0.0
+    f1   = 2 * sens * ppv / (sens + ppv) if sens + ppv else 0.0
 
     return {
-        "TP": tp,
-        "FP": fp,
-        "FN": fn,
-        "Sensitivity": sens,
-        "PPV": ppv,
-        "F1": f1,
-        "unmatched_pred": predicted[~used],
-        "matched_pred": np.asarray(matched_pred, dtype=int),
-        "matched_expert": np.asarray(matched_expert, dtype=int),
+        "TP": tp, "FP": fp, "FN": fn,
+        "Sensitivity": sens, "PPV": ppv, "F1": f1,
+        "unmatched_pred":  predicted[~used],
+        "matched_pred":    np.asarray(matched_pred,   dtype=int),
+        "matched_expert":  np.asarray(matched_expert, dtype=int),
     }
 
+
+# =============================================================================
+# TRAINING SET EVALUATION
+# =============================================================================
 
 def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=True):
     try:
@@ -184,14 +217,16 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
         print("Please ensure the dataSet folder with ProjectTrainData.mat is present.")
         return [], {}
 
-    ecg_records = data["ECG"].ravel()
+    ecg_records    = data["ECG"].ravel()
     expert_records = data["QRSexpert"].ravel()
-    tolerance = int(0.050 * DEFAULT_FS)
+    tolerance      = int(0.050 * DEFAULT_FS)
 
-    rows = []
+    rows   = []
     totals = {"TP": 0, "FP": 0, "FN": 0}
 
-    for record_number, (raw_cell, expert_cell) in enumerate(zip(ecg_records, expert_records), start=1):
+    for record_number, (raw_cell, expert_cell) in enumerate(
+            zip(ecg_records, expert_records), start=1):
+
         raw = raw_cell.ravel().astype(float)
         if max_len is not None:
             raw = raw[:max_len]
@@ -202,18 +237,19 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
         _filtered, predicted = detect_qrs(raw, DEFAULT_FS)
         metrics = match_qrs(predicted, expert, tolerance)
 
-        rr = clean_rr_intervals(
-    _compute_rr_intervals(predicted)
-)
+        # clean RR in seconds, then convert to ms for display/time-domain
+        rr    = clean_rr_intervals(_compute_rr_intervals(predicted))
         rr_ms = rr * 1000.0
 
-        avr_rr_int    = float(np.mean(rr_ms))                                        if len(rr) >= 1 else 0.0
-        stdev_rr_int  = float(np.std(rr_ms, ddof=1))                                 if len(rr) >  1 else 0.0
-        rmssd         = float(np.sqrt(np.mean(np.diff(rr_ms) ** 2)))                 if len(rr) >  1 else 0.0
-        pnn50         = float(np.sum(np.abs(np.diff(rr)) > 0.05)
-                              / max(1, len(rr) - 1) * 100.0)                         if len(rr) >  1 else 0.0
+        avr_rr_int   = float(np.mean(rr_ms))                               if len(rr) >= 1 else 0.0
+        stdev_rr_int = float(np.std(rr_ms, ddof=1))                        if len(rr) >  1 else 0.0
+        rmssd        = float(np.sqrt(np.mean(np.diff(rr_ms) ** 2)))        if len(rr) >  1 else 0.0
+        pnn50        = float(np.sum(np.abs(np.diff(rr)) > 0.05)
+                             / max(1, len(rr) - 1) * 100.0)                if len(rr) >  1 else 0.0
+
+        # pass cleaned RR in seconds — _estimate_lf_hf_power converts internally
         LF_power, HF_power = _estimate_lf_hf_power(rr)
-        LF_HF_ratio   = float(LF_power / HF_power)                                   if HF_power else 0.0
+        LF_HF_ratio = float(LF_power / HF_power) if HF_power else 0.0
 
         print(f"avgRR={avr_rr_int:.6f} ms")
         print(f"sdRR={stdev_rr_int:.6f} ms")
@@ -226,7 +262,8 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
         for key in totals:
             totals[key] += metrics[key]
 
-        unmatched_expert = np.setdiff1d(expert, metrics["matched_expert"], assume_unique=False)
+        unmatched_expert = np.setdiff1d(expert, metrics["matched_expert"],
+                                        assume_unique=False)
         first_error = None
         if len(unmatched_expert):
             first_error = int(unmatched_expert[0])
@@ -234,15 +271,15 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
             first_error = int(metrics["unmatched_pred"][0])
 
         row = {
-            "record":            record_number,
-            "TP":                metrics["TP"],
-            "FP":                metrics["FP"],
-            "FN":                metrics["FN"],
-            "Sensitivity":       metrics["Sensitivity"],
-            "PPV":               metrics["PPV"],
-            "F1":                metrics["F1"],
-            "pred_count":        len(predicted),
-            "expert_count":      len(expert),
+            "record":             record_number,
+            "TP":                 metrics["TP"],
+            "FP":                 metrics["FP"],
+            "FN":                 metrics["FN"],
+            "Sensitivity":        metrics["Sensitivity"],
+            "PPV":                metrics["PPV"],
+            "F1":                 metrics["F1"],
+            "pred_count":         len(predicted),
+            "expert_count":       len(expert),
             "first_error_sample": first_error,
         }
         rows.append(row)
@@ -261,12 +298,8 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
     total_ppv  = totals["TP"] / (totals["TP"] + totals["FP"])
     total_f1   = 2 * total_sens * total_ppv / (total_sens + total_ppv)
     summary = {
-        "TP":          totals["TP"],
-        "FP":          totals["FP"],
-        "FN":          totals["FN"],
-        "Sensitivity": total_sens,
-        "PPV":         total_ppv,
-        "F1":          total_f1,
+        "TP": totals["TP"], "FP": totals["FP"], "FN": totals["FN"],
+        "Sensitivity": total_sens, "PPV": total_ppv, "F1": total_f1,
     }
 
     print(
@@ -280,17 +313,19 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
     return rows, summary
 
 
+# =============================================================================
+# SAVE OUTPUTS
+# =============================================================================
+
 def save_metrics_csv(rows, summary, out_dir):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "training_metrics.csv"
 
     fieldnames = [
-        "record",
-        "TP", "FP", "FN",
+        "record", "TP", "FP", "FN",
         "Sensitivity", "PPV", "F1",
-        "pred_count", "expert_count",
-        "first_error_sample",
+        "pred_count", "expert_count", "first_error_sample",
     ]
     with csv_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -299,16 +334,14 @@ def save_metrics_csv(rows, summary, out_dir):
             writer.writerow(row)
 
     summary_path = out_dir / "training_summary.txt"
-    summary_path.write_text(
-        "\n".join([
-            f"Sensitivity: {summary['Sensitivity']:.6f}",
-            f"PPV:         {summary['PPV']:.6f}",
-            f"F1:          {summary['F1']:.6f}",
-            f"TP:          {summary['TP']}",
-            f"FP:          {summary['FP']}",
-            f"FN:          {summary['FN']}",
-        ]) + "\n"
-    )
+    summary_path.write_text("\n".join([
+        f"Sensitivity: {summary['Sensitivity']:.6f}",
+        f"PPV:         {summary['PPV']:.6f}",
+        f"F1:          {summary['F1']:.6f}",
+        f"TP:          {summary['TP']}",
+        f"FP:          {summary['FP']}",
+        f"FN:          {summary['FN']}",
+    ]) + "\n")
 
     return csv_path, summary_path
 
@@ -319,8 +352,8 @@ def plot_f1_by_record(rows, out_dir):
     import matplotlib.pyplot as plt
 
     out_path = Path(out_dir) / "f1_by_record.png"
-    records = [row["record"] for row in rows]
-    f1      = [row["F1"]     for row in rows]
+    records  = [row["record"] for row in rows]
+    f1       = [row["F1"]     for row in rows]
 
     plt.figure(figsize=(13, 4.8))
     colors = ["tab:red" if v < 0.95 else "tab:blue" for v in f1]
@@ -328,14 +361,10 @@ def plot_f1_by_record(rows, out_dir):
     plt.axhline(0.99, color="0.3", linestyle="--", linewidth=1, label="F1 = 0.99")
     plt.ylim(0.80, 1.005)
     plt.xticks(records)
-    plt.xlabel("Record")
-    plt.ylabel("F1-score")
+    plt.xlabel("Record"); plt.ylabel("F1-score")
     plt.title("Training QRS Detection F1 by Record")
-    plt.grid(axis="y", alpha=0.25)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=160)
-    plt.close()
+    plt.grid(axis="y", alpha=0.25); plt.legend(); plt.tight_layout()
+    plt.savefig(out_path, dpi=160); plt.close()
     return out_path
 
 
@@ -354,26 +383,21 @@ def plot_sensitivity_ppv(rows, out_dir):
     for record, x, y in zip(records, ppv, sens):
         if x < 0.97 or y < 0.97:
             plt.text(x + 0.002, y + 0.002, str(record), fontsize=9)
-    plt.xlim(0.80, 1.005)
-    plt.ylim(0.80, 1.005)
-    plt.xlabel("Positive Predictivity")
-    plt.ylabel("Sensitivity")
+    plt.xlim(0.80, 1.005); plt.ylim(0.80, 1.005)
+    plt.xlabel("Positive Predictivity"); plt.ylabel("Sensitivity")
     plt.title("Sensitivity vs PPV")
-    plt.grid(alpha=0.25)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=160)
-    plt.close()
+    plt.grid(alpha=0.25); plt.tight_layout()
+    plt.savefig(out_path, dpi=160); plt.close()
     return out_path
 
 
 def save_worst_overlays(mat_path, rows, out_dir, worst_count=4, length=15_000):
-    data = loadmat(mat_path)
+    data           = loadmat(mat_path)
     ecg_records    = data["ECG"].ravel()
     expert_records = data["QRSexpert"].ravel()
-    out_paths = []
+    out_paths      = []
 
-    worst = sorted(rows, key=lambda row: row["F1"])[:worst_count]
-    for row in worst:
+    for row in sorted(rows, key=lambda r: r["F1"])[:worst_count]:
         record_number = row["record"]
         raw    = ecg_records[record_number - 1].ravel().astype(float)
         expert = expert_records[record_number - 1].ravel().astype(int) - 1
@@ -384,14 +408,9 @@ def save_worst_overlays(mat_path, rows, out_dir, worst_count=4, length=15_000):
         start    = 0 if center is None else max(0, int(center) - length // 2)
         out_path = Path(out_dir) / f"record_{record_number:02d}_overlay.png"
         save_overlay_plot(
-            raw=raw,
-            expert=expert,
-            filtered=filtered,
-            predicted=predicted,
-            out_path=out_path,
-            record_number=record_number,
-            start=start,
-            length=length,
+            raw=raw, expert=expert, filtered=filtered, predicted=predicted,
+            out_path=out_path, record_number=record_number,
+            start=start, length=length,
         )
         out_paths.append(out_path)
 
@@ -401,25 +420,28 @@ def save_worst_overlays(mat_path, rows, out_dir, worst_count=4, length=15_000):
 def save_training_plots(mat_path, rows, summary, out_dir, worst_count=4):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
     outputs = []
     outputs.extend(save_metrics_csv(rows, summary, out_dir))
     outputs.append(plot_f1_by_record(rows, out_dir))
     outputs.append(plot_sensitivity_ppv(rows, out_dir))
-    outputs.extend(save_worst_overlays(mat_path, rows, out_dir, worst_count=worst_count))
+    outputs.extend(save_worst_overlays(mat_path, rows, out_dir, worst_count))
     return outputs
 
 
+# =============================================================================
+# MAIN
+# =============================================================================
+
 def main():
     parser = argparse.ArgumentParser(description="QRS training evaluation and visualization")
-    parser.add_argument("--eval-train",   action="store_true", help="run full training-set QRS evaluation")
-    parser.add_argument("--save-plots",   action="store_true", help="save CSV, metrics plots, and worst overlays")
+    parser.add_argument("--eval-train",   action="store_true")
+    parser.add_argument("--save-plots",   action="store_true")
     parser.add_argument("--out-dir",      type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--mat",          type=Path, default=PROJECT_TRAIN_DATA)
-    parser.add_argument("--max-len",      type=int,  default=None, help="optional crop for quick experiments")
+    parser.add_argument("--max-len",      type=int,  default=None)
     parser.add_argument("--worst-count",  type=int,  default=4)
-    parser.add_argument("--viz",          action="store_true", help="open interactive overlay viewer")
-    parser.add_argument("--patient",      type=int,  default=1, help="1-based record number for --viz")
+    parser.add_argument("--viz",          action="store_true")
+    parser.add_argument("--patient",      type=int,  default=1)
     parser.add_argument("--start",        type=int,  default=0)
     parser.add_argument("--length",       type=int,  default=15_000)
     parser.add_argument("--show-raw",     action="store_true")
@@ -427,12 +449,9 @@ def main():
 
     if args.viz:
         run_qrs_debug_viewer(
-            mat_path=args.mat,
-            patient=args.patient,
-            start=args.start,
-            length=args.length,
-            max_len=args.max_len,
-            show_raw=args.show_raw,
+            mat_path=args.mat, patient=args.patient,
+            start=args.start, length=args.length,
+            max_len=args.max_len, show_raw=args.show_raw,
         )
         return
 
@@ -440,10 +459,7 @@ def main():
     if args.save_plots or args.eval_train:
         if args.save_plots:
             outputs = save_training_plots(
-                args.mat,
-                rows,
-                summary,
-                args.out_dir,
+                args.mat, rows, summary, args.out_dir,
                 worst_count=args.worst_count,
             )
             print("\nSaved outputs:")
