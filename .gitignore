@@ -5,3 +5,4 @@ __pycache__/
 *$py.class
 ECG_Detection.code-workspace
 /outputs
+*.code-workspace
