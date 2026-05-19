@@ -2,6 +2,7 @@ import argparse
 import csv
 import os
 from pathlib import Path
+import pandas as pd
 
 import numpy as np
 from scipy.io import loadmat
@@ -145,6 +146,9 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
     rows = []
     totals = {"TP": 0, "FP": 0, "FN": 0}
 
+    all_predictions = {}
+
+
     for record_number, (raw_cell, expert_cell) in enumerate(zip(ecg_records, expert_records), start=1):
         raw = raw_cell.ravel().astype(float)
         if max_len is not None:
@@ -184,6 +188,8 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
         }
         rows.append(row)
 
+        all_predictions[record_number] = predicted
+
         if verbose:
             print(
                 f"Record {record_number:02d}: "
@@ -199,6 +205,10 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
                 print(f"  offsets pred-expert: {row['offset_summary']}")
             if row["fp_clusters"] and (row["F1"] < 0.995 or row["FP"] >= 50):
                 print(f"  FP clusters: {row['fp_clusters']}")
+
+    np.save("predictions.npy", all_predictions, allow_pickle=True)
+    pd.DataFrame(rows).to_csv("metrics.csv", index=False)
+
 
     total_sens = totals["TP"] / (totals["TP"] + totals["FN"])
     total_ppv = totals["TP"] / (totals["TP"] + totals["FP"])
