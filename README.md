@@ -12,22 +12,47 @@ This repository is for the BMET3997 major project ECG work. The current code foc
 
 ## Current QRS Method
 
-The detector is inspired by Pan-Tompkins style processing:
+The detector is inspired by Pan-Tompkins style processing, WFDB/XQRS style
+energy detection, and PhysioNet post-processing ideas. It does not use any QRS
+detection toolbox or external QRS detector.
 
 1. Apply a 50 Hz notch filter.
 2. Apply a broad ECG bandpass filter for final peak placement.
 3. Detect main candidates from local peaks in `abs(filtered ECG)`, so both upright and inverted QRS complexes can be detected.
 4. Run a second `5-20 Hz` QRS-energy branch using derivative, squaring, and moving-window integration.
-5. Use the energy branch only to fill suspiciously long RR gaps.
-6. Merge close detections with a refractory period and keep the stronger peak.
+5. Use the energy branch only to fill suspiciously long RR gaps. It is not used as the only detector because it is weaker on the full training set.
+6. Mark noisy windows with a simple signal-quality check using raw range, filtered standard deviation, energy saturation, and candidate density.
+7. Add a conservative low-confidence noise gate. This uses `qrs_snr`, meaning the median detected-QRS height divided by the median background height in the same window. It is not a physical SNR. A window is removed only when `qrs_snr` is low, energy candidates are dense, and the neighboring window is also low confidence.
+8. Merge very close detections using refractory and shape-strength cleanup.
 
-No QRS detection toolbox or QRS detection library is used.
+The earlier polarity/refinement experiment was removed from the main path. It
+helped a few screenshots but often chose the wrong side of biphasic QRS
+complexes, especially when morphology changed. Removing it slightly improved the
+full training F1 and should generalize better than fitting record-specific peak
+direction rules.
 
 References used for the approach:
 
 - Pan and Tompkins, "A Real-Time QRS Detection Algorithm", 1985.
 - PhysioNet `wqrs` and `gqrs` detector documentation.
 - WFDB `XQRS` processing notes.
+- WFDB `correct_peaks` style post-processing idea.
+- ECG signal-quality/artifact assessment ideas.
+
+## What Changed In The Latest Cleanup
+
+- Removed the polarity detector and final peak refinement from the main QRS path.
+- Kept the main `abs(filtered ECG)` detector because it works for both upright and inverted beats.
+- Kept the QRS-energy branch only as a missed-beat rescue inside long RR gaps.
+- Kept the signal-quality mask for extreme artifact windows, because it reduces noisy false positives.
+- Added the `qrs_snr + energy density` soft gate to catch long noisy sections that are not extreme enough for the raw-range artifact rules.
+- Kept simple close-peak shape cleanup, but only for duplicate/very-close detections.
+- Added debug layers for noisy windows, noise score, removed-noise peaks, removed-shape peaks, main candidates, and energy candidates.
+- Added training output columns for timing offset summary and false-positive clusters.
+
+No record-specific rule is used. The rules are based on general ECG ideas:
+refractory period, plausible RR interval, QRS energy, artifact amplitude, and
+candidate density.
 
 ## Setup
 
@@ -80,7 +105,7 @@ outputs/qrs_eval/
 
 Generated files:
 
-- `training_metrics.csv`: per-record metrics.
+- `training_metrics.csv`: per-record metrics, offset summary, and false-positive cluster summary.
 - `training_summary.txt`: overall Sensitivity, PPV, F1, TP, FP, FN.
 - `f1_by_record.png`: F1-score by record.
 - `sensitivity_vs_ppv.png`: Sensitivity vs PPV scatter plot.
@@ -89,15 +114,32 @@ Generated files:
 Current full-training result from this detector:
 
 ```text
-Sensitivity: 0.997169
-PPV: 0.989518
-F1: 0.993329
-TP: 1117878
-FP: 11842
-FN: 3174
+Sensitivity: 0.996127
+PPV: 0.995692
+F1: 0.995909
+TP: 1116710
+FP: 4832
+FN: 4342
 ```
 
-The weakest record is currently record 25, mainly because it still has many false positives.
+### Current branch — performance summary
+
+Across all **35** training records, aggregated metrics against expert annotations
+(with **50 ms** tolerance) are: **Sensitivity 0.9961**, **PPV 0.9957**, **F1 0.9959**
+(total **1,116,710** TP, **4,832** FP, **4,342** FN). Most records score **F1 ≥ 0.997**;
+the weakest are **records 17, 24, 25, and 33** (roughly **0.95–0.99** F1), where errors
+show up as **dense false-positive clusters** in localized time intervals and, on some
+tracks, noticeable **timing offsets** versus the expert peak indices (see per-record `offsets pred-expert` and `FP clusters` lines when running `--eval-train`). Elsewhere,
+residual mismatch is mostly small index shifts rather than wholesale missed beats.
+
+Compared with the previous quality-mask-only version, the `qrs_snr + energy
+density` gate keeps sensitivity almost the same while reducing false positives
+by about one thousand. Compared with the earlier `~0.9933` QRS version, it is
+clearly better. Compared with the original baseline around `0.973`, it is much
+better.
+
+The main remaining weak points are noisy sections where the expert labels stop,
+and morphology changes such as record 17 later in the signal.
 
 ## Interactive Overlay Viewer
 
@@ -122,10 +164,23 @@ Useful flags:
 | `--max-len N` | Crop each record for quick debugging.                            |
 
 
+The viewer can draw raw ECG, filtered ECG, `abs(filtered)`, main threshold, QRS
+energy, energy threshold, predicted QRS, expert QRS, main candidates, energy
+candidates, noisy-window mask, noise score, removed noise peaks, and removed
+shape peaks. Layers can be hidden from the checkbox panel.
+
+Navigation:
+
+- Use the `Start` and `Window` sliders to move and zoom by sample range.
+- Use the mouse wheel over the plot to zoom horizontally.
+- Use `n`/right arrow for next record and `p`/left arrow for previous record.
+
+
 ## Files
 
-- `qrs_pipeline.py`: ECG filtering, QRS detection, missed-beat filling, and overlay plotting.
-- `test.py`: command-line evaluation and visualization outputs.
+- `qrs_pipeline.py`: ECG filtering, QRS detection, missed-beat filling, signal-quality filtering, and overlay plotting.
+- `qrs_debug_viewer.py`: interactive debug viewer, layer toggles, sliders, record navigation, and scroll zoom.
+- `test.py`: command-line evaluation, CSV output, offset summaries, FP cluster summaries, and visualization outputs.
 - `README.md`: project summary and run instructions.
 
 ## Current Scope
@@ -136,4 +191,3 @@ This stage does not:
 - generate the final test-set submission `.mat`,
 - modify `hrvcalc.py`,
 - use any QRS detection toolbox/library.
-

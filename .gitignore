@@ -3,3 +3,5 @@ dataSet/
 __pycache__/
 *.py[cod]
 *$py.class
+ECG_Detection.code-workspace
+/outputs

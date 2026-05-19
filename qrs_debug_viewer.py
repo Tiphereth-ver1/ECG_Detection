@@ -7,16 +7,73 @@ from qrs_pipeline import DEFAULT_FS, default_train_mat, detect_qrs_debug, load_r
 
 MIN_WINDOW = 500
 MAX_WINDOW = 500_000
+MAX_WINDOW_FRACTION = 1 / 8
+TOLERANCE_SAMPLES = int(0.050 * DEFAULT_FS)
 
 
 def _peaks_in_window(peaks, start, end):
+    """Return only peak indices that are visible in the current viewer window."""
     peaks = np.asarray(peaks, dtype=int)
     return peaks[(peaks >= start) & (peaks < end)]
 
 
+def _fp_fn_peaks(predicted, expert, tolerance_samples):
+    # Same idea as the training evaluation: each prediction can only match one
+    # expert point. Anything left unmatched is shown as FP/FN in the viewer.
+    predicted = np.sort(np.asarray(predicted, dtype=int))
+    expert = np.sort(np.asarray(expert, dtype=int))
+
+    used_pred = np.zeros(len(predicted), dtype=bool)
+    used_expert = np.zeros(len(expert), dtype=bool)
+    search_start = 0
+
+    for expert_idx, expert_peak in enumerate(expert):
+        while search_start < len(predicted) and predicted[search_start] < expert_peak - tolerance_samples:
+            search_start += 1
+
+        best_idx = -1
+        best_dist = tolerance_samples + 1
+        idx = search_start
+        while idx < len(predicted) and predicted[idx] <= expert_peak + tolerance_samples:
+            if not used_pred[idx]:
+                dist = abs(predicted[idx] - expert_peak)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+            idx += 1
+
+        if best_idx >= 0:
+            used_pred[best_idx] = True
+            used_expert[expert_idx] = True
+
+    return predicted[~used_pred], expert[~used_expert]
+
+
+def _bad_spans(mask, start, end):
+    # Convert a boolean quality mask into continuous noisy ranges so matplotlib
+    # can draw them as shaded background spans.
+    mask = np.asarray(mask, dtype=bool)
+    spans = []
+    in_bad = False
+    bad_start = start
+    for idx in range(start, end):
+        is_bad = not mask[idx]
+        if is_bad and not in_bad:
+            bad_start = idx
+            in_bad = True
+        elif not is_bad and in_bad:
+            spans.append((bad_start, idx))
+            in_bad = False
+    if in_bad:
+        spans.append((bad_start, end))
+    return spans
+
+
 def _window_limits(n_samples):
+    """Keep slider window sizes inside useful bounds for short and long records."""
     min_window = min(MIN_WINDOW, max(1, n_samples))
-    max_window = min(MAX_WINDOW, max(min_window, n_samples))
+    original_max_window = min(MAX_WINDOW, max(min_window, n_samples))
+    max_window = max(min_window, int(original_max_window * MAX_WINDOW_FRACTION))
     return min_window, max_window
 
 
@@ -28,6 +85,7 @@ def run_qrs_debug_viewer(
     max_len=None,
     show_raw=False,
 ):
+    """Open the interactive QRS debug viewer for one training record."""
     import matplotlib.pyplot as plt
     from matplotlib.widgets import Button, CheckButtons, Slider
 
@@ -41,6 +99,8 @@ def run_qrs_debug_viewer(
     cache = {"key": None, "data": None}
 
     layer_visible = {
+        # The checkbox panel is driven by this dictionary. Defaults keep the
+        # most useful diagnosis layers visible without making the plot too busy.
         "Raw ECG": bool(show_raw),
         "Filtered ECG": True,
         "Abs filtered": True,
@@ -49,20 +109,37 @@ def run_qrs_debug_viewer(
         "Energy threshold": True,
         "Predicted QRS": True,
         "Expert QRS": True,
+        "FP/FN overlay": True,
         "Main candidates": False,
         "Energy candidates": False,
+        "Quality mask": False,
+        "Noise score": False,
+        "Removed noise": True,
+        "Removed shape": True,
     }
 
     def get_full(patient_idx):
+        # Cache one record at a time. Detection is expensive on long records, so
+        # redraws should reuse the same debug arrays.
         key = (patient_idx, max_len, str(mat_path))
         if cache["key"] != key:
             raw_full, expert_full = load_recording(mat_path, patient_idx, max_len)
             debug_full = detect_qrs_debug(raw_full, DEFAULT_FS)
+            if expert_full is not None:
+                fp_peaks, fn_peaks = _fp_fn_peaks(
+                    debug_full["predicted_peaks"],
+                    expert_full,
+                    TOLERANCE_SAMPLES,
+                )
+                debug_full["fp_peaks"] = fp_peaks
+                debug_full["fn_peaks"] = fn_peaks
             cache["key"] = key
             cache["data"] = raw_full, expert_full, debug_full
         return cache["data"]
 
     def clamp_window(win_start, win_len, n_samples):
+        # Sliders can send float values, so normalize everything to valid
+        # integer sample indices before drawing.
         min_window, max_window = _window_limits(n_samples)
         win_len = int(max(min_window, min(int(win_len), max_window)))
         max_start = max(0, n_samples - win_len)
@@ -70,6 +147,8 @@ def run_qrs_debug_viewer(
         return win_start, win_len
 
     def draw(patient_idx, win_start, win_len):
+        # Main redraw function. It slices all debug arrays to the same sample
+        # window, then draws every enabled layer on aligned time axes.
         raw_full, expert_full, debug = get_full(patient_idx)
         n_samples = len(raw_full)
         start_i, win_len = clamp_window(win_start, win_len, n_samples)
@@ -80,18 +159,43 @@ def run_qrs_debug_viewer(
         filtered = debug["filtered"]
         abs_filtered = debug["abs_filtered"]
         energy = debug["energy_integrated"]
+        quality_mask = debug.get("quality_mask", np.ones(n_samples, dtype=bool))
+        noise_score = debug.get("noise_score", np.zeros(n_samples, dtype=float))
 
+        # Convert full-record peak arrays into per-window arrays so scatter
+        # calls do not draw hidden points outside the current x-limits.
         pred_vis = _peaks_in_window(debug["predicted_peaks"], start_i, end)
         main_vis = _peaks_in_window(debug["main_peaks"], start_i, end)
         energy_vis = _peaks_in_window(debug["energy_peaks"], start_i, end)
+        removed_noise_vis = _peaks_in_window(debug.get("removed_noise_peaks", []), start_i, end)
+        removed_shape_vis = _peaks_in_window(debug.get("removed_shape_peaks", []), start_i, end)
 
         if expert_full is None:
             expert_vis = np.asarray([], dtype=int)
+            fp_vis = np.asarray([], dtype=int)
+            fn_vis = np.asarray([], dtype=int)
         else:
             expert_vis = _peaks_in_window(expert_full, start_i, end)
+            fp_vis = _peaks_in_window(debug.get("fp_peaks", []), start_i, end)
+            fn_vis = _peaks_in_window(debug.get("fn_peaks", []), start_i, end)
 
         ax.clear()
         ax_energy.clear()
+
+        # Show noisy windows behind the ECG. These are the regions where the
+        # detector deletes QRS candidates before final output.
+        if layer_visible["Quality mask"]:
+            first_span = True
+            for bad_start, bad_end in _bad_spans(quality_mask, start_i, end):
+                ax.axvspan(
+                    bad_start / DEFAULT_FS,
+                    bad_end / DEFAULT_FS,
+                    color="tab:red",
+                    alpha=0.08,
+                    label="Quality mask: noisy" if first_span else None,
+                    zorder=0,
+                )
+                first_span = False
 
         if layer_visible["Raw ECG"]:
             ax.plot(t, raw_full[sl], color="#9ecae1", linewidth=0.7, alpha=0.75, label="Raw ECG")
@@ -131,6 +235,32 @@ def run_qrs_debug_viewer(
                 zorder=8,
             )
 
+        # Removed markers explain false-positive cleanup. Red means removed by
+        # signal-quality mask; brown means removed by close-peak shape cleanup.
+        if layer_visible["Removed noise"] and len(removed_noise_vis):
+            ax.scatter(
+                removed_noise_vis / DEFAULT_FS,
+                filtered[removed_noise_vis],
+                s=42,
+                color="tab:red",
+                marker="x",
+                linewidths=1.2,
+                label=f"Removed noise ({len(removed_noise_vis)})",
+                zorder=10,
+            )
+
+        if layer_visible["Removed shape"] and len(removed_shape_vis):
+            ax.scatter(
+                removed_shape_vis / DEFAULT_FS,
+                filtered[removed_shape_vis],
+                s=40,
+                color="tab:brown",
+                marker="x",
+                linewidths=1.2,
+                label=f"Removed shape ({len(removed_shape_vis)})",
+                zorder=10,
+            )
+
         if layer_visible["Expert QRS"] and len(expert_vis):
             ax.scatter(
                 expert_vis / DEFAULT_FS,
@@ -143,10 +273,37 @@ def run_qrs_debug_viewer(
                 zorder=9,
             )
 
+        if layer_visible["FP/FN overlay"]:
+            if len(fp_vis):
+                ax.scatter(
+                    fp_vis / DEFAULT_FS,
+                    filtered[fp_vis],
+                    s=95,
+                    facecolors="none",
+                    edgecolors="tab:red",
+                    marker="o",
+                    linewidths=2.0,
+                    label=f"FP ({len(fp_vis)})",
+                    zorder=12,
+                )
+            if len(fn_vis):
+                ax.scatter(
+                    fn_vis / DEFAULT_FS,
+                    filtered[fn_vis],
+                    s=105,
+                    color="tab:red",
+                    marker="x",
+                    linewidths=2.2,
+                    label=f"FN ({len(fn_vis)})",
+                    zorder=13,
+                )
+
         energy_axis_on = (
+            # Hide the right y-axis when no energy/noise layers are enabled.
             layer_visible["QRS energy"]
             or layer_visible["Energy threshold"]
             or layer_visible["Energy candidates"]
+            or layer_visible["Noise score"]
         )
         ax_energy.set_visible(energy_axis_on)
         if energy_axis_on:
@@ -169,6 +326,21 @@ def run_qrs_debug_viewer(
                     marker="o",
                     label=f"Energy candidates ({len(energy_vis)})",
                     zorder=6,
+                )
+            if layer_visible["Noise score"]:
+                # Noise score has arbitrary units, so scale it onto the energy
+                # axis only for visual comparison.
+                max_noise = max(float(np.max(noise_score[sl])), 1.0)
+                visible_energy = energy[sl] if len(energy[sl]) else np.asarray([1.0])
+                energy_scale = max(float(np.percentile(visible_energy, 95)), debug["energy_threshold"], 1.0)
+                scaled_noise = noise_score[sl] / max_noise * energy_scale
+                ax_energy.plot(
+                    t,
+                    scaled_noise,
+                    color="tab:red",
+                    linewidth=0.9,
+                    alpha=0.85,
+                    label="Noise score (scaled)",
                 )
 
         ax.set_xlim(start_i / DEFAULT_FS, end / DEFAULT_FS)
@@ -196,7 +368,7 @@ def run_qrs_debug_viewer(
     ax_energy.patch.set_visible(False)
     plt.subplots_adjust(left=0.08, right=0.77, bottom=0.24)
 
-    ax_check = fig.add_axes((0.80, 0.29, 0.18, 0.54))
+    ax_check = fig.add_axes((0.80, 0.22, 0.18, 0.61))
     ax_slider_start = fig.add_axes((0.12, 0.15, 0.55, 0.03))
     ax_slider_len = fig.add_axes((0.12, 0.10, 0.55, 0.03))
     ax_btn_prev = fig.add_axes((0.12, 0.035, 0.12, 0.045))
@@ -233,6 +405,7 @@ def run_qrs_debug_viewer(
     btn_controls = Button(ax_btn_controls, "Hide controls")
 
     def set_slider_values(new_start, new_length):
+        # Update both sliders without triggering two redraws.
         raw_full, _expert_full, _debug_full = get_full(current_patient[0])
         n_samples = len(raw_full)
         new_start, new_length = clamp_window(new_start, new_length, n_samples)
@@ -271,12 +444,16 @@ def run_qrs_debug_viewer(
     controls_open = [True]
 
     def toggle_controls(_event):
+        # Collapse only the checkbox panel. Sliders and navigation stay visible
+        # because they are needed for moving around the record.
         controls_open[0] = not controls_open[0]
         ax_check.set_visible(controls_open[0])
         btn_controls.label.set_text("Hide controls" if controls_open[0] else "Show controls")
         fig.canvas.draw_idle()
 
     def on_scroll(event):
+        # Horizontal zoom around the mouse cursor. This keeps the same relative
+        # focus point when the window length changes.
         if event.inaxes not in (ax, ax_energy):
             return
 
