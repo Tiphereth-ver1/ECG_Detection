@@ -44,6 +44,10 @@ def default_train_mat():
     """Return the default training .mat path used by the CLI and viewer."""
     return Path(__file__).resolve().parent / "dataSet" / "ProjectTrainData.mat"
 
+def default_test_mat():
+    """Return the default training .mat path used by the CLI and viewer."""
+    return Path(__file__).resolve().parent / "dataSet" / "ProjectTestData.mat"
+
 
 def _notch_filter(raw, fs=DEFAULT_FS):
     """Remove 50 Hz power-line noise before the broader ECG filters."""
