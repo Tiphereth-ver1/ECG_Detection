@@ -24,7 +24,7 @@ DEFAULT_HRV_REFERENCE = Path(__file__).resolve().parent / "documents" / "trainin
 HRV_KEYS = ("avgRR", "sdRR", "RMSSD", "pNN50", "LF", "HF", "LF_HFratio")
 WINDOW_SAMPLES = int(5 * 60 * DEFAULT_FS)
 MIN_RR_PER_WINDOW = 20
-MAX_CLEAN_LOSS = 0.20
+MIN_UNFLAGGED_RR_SECONDS_PER_WINDOW = 4 * 60
 
 
 def parse_length(length, raw_len=None):
@@ -38,7 +38,7 @@ def _compute_rr_intervals(peaks, fs=DEFAULT_FS):
     return np.diff(peaks) / fs
 
 
-def clean_rr_intervals(rr, min_rr=0.3, max_rr=2.0):
+def clean_rr_intervals(rr, min_rr=0.25, max_rr=2.0):
     rr = np.asarray(rr, dtype=float)
     return rr[(rr >= min_rr) & (rr <= max_rr)]
 
@@ -86,8 +86,10 @@ def _hrv_for_window(window_peaks, fs=DEFAULT_FS):
         return None
 
     rr = clean_rr_intervals(rr_raw)
-    fraction_removed = 1.0 - (len(rr) / len(rr_raw))
-    if fraction_removed > MAX_CLEAN_LOSS or len(rr) < MIN_RR_PER_WINDOW:
+    if len(rr) < MIN_RR_PER_WINDOW:
+        return None
+
+    if np.sum(rr) < MIN_UNFLAGGED_RR_SECONDS_PER_WINDOW:
         return None
 
     rr_ms = rr * 1000.0

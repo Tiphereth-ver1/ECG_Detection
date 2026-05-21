@@ -24,9 +24,9 @@ WINDOW_SAMPLES = int(5 * 60 * DEFAULT_FS)
 # Minimum number of clean RR intervals required to trust a window
 MIN_RR_PER_WINDOW = 20
 
-# Maximum fraction of RR intervals that can be removed by cleaning before
-# we consider the window too noisy to use
-MAX_CLEAN_LOSS = 0.20   # if >20% of beats removed, skip window
+# Minimum accumulated clean RR interval duration required by the project rubric
+# for a 5-minute window to count toward HRV.
+MIN_UNFLAGGED_RR_SECONDS_PER_WINDOW = 4 * 60
 
 
 # =============================================================================
@@ -41,7 +41,7 @@ def _compute_rr_intervals(peaks, fs=DEFAULT_FS):
     return np.diff(peaks) / fs
 
 
-def clean_rr_intervals(rr, min_rr=0.3, max_rr=2.0):
+def clean_rr_intervals(rr, min_rr=0.25, max_rr=2.0):
     rr = np.asarray(rr, dtype=float)
     return rr[(rr >= min_rr) & (rr <= max_rr)]
 
@@ -126,12 +126,10 @@ def _hrv_for_window(window_peaks, fs=DEFAULT_FS):
         return None   # not enough beats
 
     rr = clean_rr_intervals(rr_raw)
-    fraction_removed = 1.0 - (len(rr) / len(rr_raw))
-
-    if fraction_removed > MAX_CLEAN_LOSS:
+    if len(rr) < MIN_RR_PER_WINDOW:
         return None
 
-    if len(rr) < MIN_RR_PER_WINDOW:
+    if np.sum(rr) < MIN_UNFLAGGED_RR_SECONDS_PER_WINDOW:
         return None
 
     rr_ms = rr * 1000.0
