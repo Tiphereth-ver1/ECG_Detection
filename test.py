@@ -6,6 +6,7 @@ import pandas as pd
 
 import numpy as np
 from scipy.io import loadmat
+from scipy.signal import welch
 
 from qrs_pipeline import (
     DEFAULT_FS,
@@ -18,19 +19,129 @@ from qrs_debug_viewer import run_qrs_debug_viewer
 
 PROJECT_TRAIN_DATA = default_train_mat()
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "outputs" / "qrs_eval"
+DEFAULT_HRV_REFERENCE = Path(__file__).resolve().parent / "documents" / "training_expert_hrv_reference.csv"
+
+HRV_KEYS = ("avgRR", "sdRR", "RMSSD", "pNN50", "LF", "HF", "LF_HFratio")
+WINDOW_SAMPLES = int(5 * 60 * DEFAULT_FS)
+MIN_RR_PER_WINDOW = 20
+MAX_CLEAN_LOSS = 0.20
 
 
 def parse_length(length, raw_len=None):
     return int(length)
 
 
+def _compute_rr_intervals(peaks, fs=DEFAULT_FS):
+    peaks = np.asarray(peaks, dtype=float)
+    if len(peaks) < 2:
+        return np.asarray([], dtype=float)
+    return np.diff(peaks) / fs
+
+
+def clean_rr_intervals(rr, min_rr=0.3, max_rr=2.0):
+    rr = np.asarray(rr, dtype=float)
+    return rr[(rr >= min_rr) & (rr <= max_rr)]
+
+
+def _estimate_lf_hf_power(
+    rr_intervals,
+    min_f_lf=0.04,
+    max_f_lf=0.15,
+    max_f_hf=0.40,
+    fs_resample=4.0,
+):
+    rr_intervals = np.asarray(rr_intervals, dtype=float)
+    if len(rr_intervals) < 10:
+        return 0.0, 0.0
+
+    rr_ms = rr_intervals * 1000.0
+    time_stamps = np.concatenate([[0.0], np.cumsum(rr_ms[:-1])]) / 1000.0
+    t_uniform = np.arange(time_stamps[0], time_stamps[-1], 1.0 / fs_resample)
+    if len(t_uniform) < 8:
+        return 0.0, 0.0
+
+    rr_resampled = np.interp(t_uniform, time_stamps, rr_ms)
+    rr_resampled -= rr_resampled.mean()
+
+    freqs, psd = welch(
+        rr_resampled,
+        fs=fs_resample,
+        window="boxcar",
+        nperseg=len(rr_resampled),
+        noverlap=0,
+        scaling="density",
+    )
+
+    lf_mask = (freqs >= min_f_lf) & (freqs < max_f_lf)
+    hf_mask = (freqs >= max_f_lf) & (freqs <= max_f_hf)
+
+    lf_power = float(np.trapezoid(psd[lf_mask], freqs[lf_mask])) if lf_mask.any() else 0.0
+    hf_power = float(np.trapezoid(psd[hf_mask], freqs[hf_mask])) if hf_mask.any() else 0.0
+    return lf_power, hf_power
+
+
+def _hrv_for_window(window_peaks, fs=DEFAULT_FS):
+    rr_raw = _compute_rr_intervals(window_peaks, fs)
+    if len(rr_raw) < MIN_RR_PER_WINDOW:
+        return None
+
+    rr = clean_rr_intervals(rr_raw)
+    fraction_removed = 1.0 - (len(rr) / len(rr_raw))
+    if fraction_removed > MAX_CLEAN_LOSS or len(rr) < MIN_RR_PER_WINDOW:
+        return None
+
+    rr_ms = rr * 1000.0
+    avg_rr = float(np.mean(rr_ms))
+    sd_rr = float(np.std(rr_ms, ddof=1))
+    rmssd = float(np.sqrt(np.mean(np.diff(rr_ms) ** 2))) if len(rr_ms) > 1 else 0.0
+    pnn50 = float(np.sum(np.abs(np.diff(rr_ms)) > 50.0) / max(1, len(rr_ms) - 1) * 100.0)
+    lf_power, hf_power = _estimate_lf_hf_power(rr)
+    lf_hf_ratio = float(lf_power / hf_power) if hf_power > 0 else 0.0
+
+    return {
+        "avgRR": avg_rr,
+        "sdRR": sd_rr,
+        "RMSSD": rmssd,
+        "pNN50": pnn50,
+        "LF": lf_power,
+        "HF": hf_power,
+        "LF_HFratio": lf_hf_ratio,
+    }
+
+
+def compute_windowed_hrv(peaks, raw_len, fs=DEFAULT_FS, window_samples=WINDOW_SAMPLES):
+    peaks = np.asarray(peaks, dtype=int)
+    nan_result = {key: np.nan for key in HRV_KEYS}
+    window_results = []
+
+    for window_start in range(0, raw_len, window_samples):
+        window_end = window_start + window_samples
+        window_peaks = peaks[(peaks >= window_start) & (peaks < window_end)]
+        result = _hrv_for_window(window_peaks, fs)
+        if result is not None:
+            window_results.append(result)
+
+    if not window_results:
+        return nan_result
+
+    averaged = {}
+    for key in HRV_KEYS:
+        values = [window[key] for window in window_results]
+        averaged[key] = float(np.mean(values))
+
+    valid_ratios = [window["LF_HFratio"] for window in window_results if window["HF"] > 0]
+    averaged["LF_HFratio"] = float(np.mean(valid_ratios)) if valid_ratios else 0.0
+    return averaged
+
+
 def calculate_hr_hrv(peaks):
-    rr = np.diff(peaks) / DEFAULT_FS
+    rr = clean_rr_intervals(_compute_rr_intervals(peaks))
+    if len(rr) < 1:
+        return 0.0, 0.0
+
     hr = 60 / np.mean(rr)
-
     rr_ms = rr * 1000
-    rmssd = np.sqrt(np.mean(np.diff(rr_ms) ** 2))
-
+    rmssd = np.sqrt(np.mean(np.diff(rr_ms) ** 2)) if len(rr_ms) > 1 else 0.0
     return float(hr), float(rmssd)
 
 
@@ -140,9 +251,15 @@ def _fp_cluster_summary(unmatched_pred, fs=DEFAULT_FS, max_gap_sec=2.0, min_coun
     )
 
 
-def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=True):
-    # Evaluate every training record against QRSexpert. This does not generate
-    # a test submission and does not call the HRV code.
+def evaluate_training_set(
+    mat_path=PROJECT_TRAIN_DATA,
+    max_len=None,
+    verbose=True,
+    include_hrv=False,
+    hrv_source="predicted",
+):
+    # Evaluate every training record against QRSexpert. HRV is optional because
+    # QRS tuning usually only needs the detection metrics.
     data = loadmat(mat_path)
     ecg_records = data["ECG"].ravel()
     expert_records = data["QRSexpert"].ravel()
@@ -191,6 +308,14 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
             "offset_summary": _offset_summary(metrics["matched_pred"], metrics["matched_expert"]),
             "fp_clusters": _fp_cluster_summary(metrics["unmatched_pred"]),
         }
+
+        if include_hrv:
+            if hrv_source == "expert":
+                hrv_peaks = expert
+            else:
+                hrv_peaks = predicted
+            row.update(compute_windowed_hrv(hrv_peaks, len(raw)))
+
         rows.append(row)
 
         all_predictions[record_number] = predicted
@@ -210,6 +335,14 @@ def evaluate_training_set(mat_path=PROJECT_TRAIN_DATA, max_len=None, verbose=Tru
                 print(f"  offsets pred-expert: {row['offset_summary']}")
             if row["fp_clusters"] and (row["F1"] < 0.995 or row["FP"] >= 50):
                 print(f"  FP clusters: {row['fp_clusters']}")
+            if include_hrv:
+                print(
+                    f"  HRV({hrv_source}): "
+                    f"avgRR={row['avgRR']:.1f} "
+                    f"RMSSD={row['RMSSD']:.1f} "
+                    f"pNN50={row['pNN50']:.1f} "
+                    f"LF/HF={row['LF_HFratio']:.2f}"
+                )
 
     np.save("predictions.npy", all_predictions, allow_pickle=True)
     pd.DataFrame(rows).to_csv("metrics.csv", index=False)
@@ -259,8 +392,11 @@ def save_metrics_csv(rows, summary, out_dir):
         "offset_summary",
         "fp_clusters",
     ]
+    if rows and all(key in rows[0] for key in HRV_KEYS):
+        fieldnames.extend(HRV_KEYS)
+
     with csv_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
@@ -281,6 +417,86 @@ def save_metrics_csv(rows, summary, out_dir):
     )
 
     return csv_path, summary_path
+
+
+def save_hrv_metrics_csv(rows, out_dir, source_label):
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    filename = "hrv_metrics.csv" if source_label == "predicted" else f"hrv_{source_label}_metrics.csv"
+    csv_path = out_dir / filename
+
+    fieldnames = ["record", "avgRR", "sdRR", "RMSSD", "pNN50", "LF", "HF", "LF_HF"]
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    "record": row["record"],
+                    "avgRR": row["avgRR"],
+                    "sdRR": row["sdRR"],
+                    "RMSSD": row["RMSSD"],
+                    "pNN50": row["pNN50"],
+                    "LF": row["LF"],
+                    "HF": row["HF"],
+                    "LF_HF": row["LF_HFratio"],
+                }
+            )
+
+    return csv_path
+
+
+def save_hrv_reference_comparison(rows, reference_path, out_dir, source_label):
+    reference_path = Path(reference_path)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    reference = pd.read_csv(reference_path)
+    calculated = pd.DataFrame([{key: row[key] for key in ("record", *HRV_KEYS)} for row in rows])
+    merged = reference.merge(calculated, on="record", suffixes=("_ref", f"_{source_label}"))
+
+    detail_rows = []
+    summary_rows = []
+    for key in HRV_KEYS:
+        ref_col = f"{key}_ref"
+        calc_col = f"{key}_{source_label}"
+        errors = merged[calc_col] - merged[ref_col]
+        abs_errors = errors.abs()
+        pct_errors = abs_errors / merged[ref_col].abs().replace(0, np.nan) * 100.0
+
+        for _, record in merged.iterrows():
+            ref_value = float(record[ref_col])
+            calc_value = float(record[calc_col])
+            abs_error = abs(calc_value - ref_value)
+            pct_error = abs_error / abs(ref_value) * 100.0 if ref_value else np.nan
+            detail_rows.append(
+                {
+                    "record": int(record["record"]),
+                    "metric": key,
+                    "reference": ref_value,
+                    source_label: calc_value,
+                    "error": calc_value - ref_value,
+                    "abs_error": abs_error,
+                    "pct_error": pct_error,
+                }
+            )
+
+        summary_rows.append(
+            {
+                "metric": key,
+                "MAE": float(abs_errors.mean()),
+                "RMSE": float(np.sqrt(np.mean(errors**2))),
+                "mean_abs_pct_error": float(pct_errors.mean()),
+                "max_abs_error": float(abs_errors.max()),
+                "worst_record": int(merged.loc[abs_errors.idxmax(), "record"]),
+            }
+        )
+
+    detail_path = out_dir / f"hrv_{source_label}_vs_reference.csv"
+    summary_path = out_dir / f"hrv_{source_label}_vs_reference_summary.csv"
+    pd.DataFrame(detail_rows).to_csv(detail_path, index=False)
+    pd.DataFrame(summary_rows).to_csv(summary_path, index=False)
+    return detail_path, summary_path, summary_rows
 
 
 def plot_f1_by_record(rows, out_dir):
@@ -439,6 +655,19 @@ def main():
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--length", type=int, default=15_000, help="number of samples")
     parser.add_argument("--show-raw", action="store_true")
+    parser.add_argument("--hrv", action="store_true", help="calculate windowed HRV and save hrv_metrics.csv")
+    parser.add_argument(
+        "--compare-hrv",
+        action="store_true",
+        help="compare calculated HRV against the training expert HRV reference CSV",
+    )
+    parser.add_argument(
+        "--hrv-source",
+        choices=("predicted", "expert"),
+        default="predicted",
+        help="which QRS peaks to use for HRV on training data",
+    )
+    parser.add_argument("--hrv-reference", type=Path, default=DEFAULT_HRV_REFERENCE)
     args = parser.parse_args()
 
     if args.viz:
@@ -463,7 +692,36 @@ def main():
         )
         return
 
-    rows, summary = evaluate_training_set(args.mat, max_len=args.max_len)
+    include_hrv = args.hrv or args.compare_hrv
+    rows, summary = evaluate_training_set(
+        args.mat,
+        max_len=args.max_len,
+        include_hrv=include_hrv,
+        hrv_source=args.hrv_source,
+    )
+
+    if include_hrv:
+        hrv_path = save_hrv_metrics_csv(rows, args.out_dir, args.hrv_source)
+        print(f"\nSaved HRV metrics: {hrv_path}")
+
+    if args.compare_hrv:
+        detail_path, summary_path, hrv_summary = save_hrv_reference_comparison(
+            rows,
+            args.hrv_reference,
+            args.out_dir,
+            args.hrv_source,
+        )
+        print("\nHRV comparison vs reference:")
+        for metric in hrv_summary:
+            print(
+                f"{metric['metric']}: "
+                f"MAE={metric['MAE']:.4g} "
+                f"RMSE={metric['RMSE']:.4g} "
+                f"worst=record {metric['worst_record']}"
+            )
+        print(f"Saved HRV comparison: {detail_path}")
+        print(f"Saved HRV comparison summary: {summary_path}")
+
     if args.save_plots or args.eval_train:
         if args.save_plots:
             outputs = save_training_plots(
