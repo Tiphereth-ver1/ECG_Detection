@@ -4,14 +4,11 @@ from pathlib import Path
 
 import numpy as np
 from scipy.io import loadmat, savemat
-from scipy.interpolate import interp1d
 from scipy.signal import welch
-from scipy.signal import detrend
 
 
 from qrs_pipeline import (
     DEFAULT_FS,
-    default_train_mat,
     default_test_mat,
     detect_qrs,
     save_overlay_plot,
@@ -44,28 +41,9 @@ def _compute_rr_intervals(peaks, fs=DEFAULT_FS):
     return np.diff(peaks) / fs
 
 
-def clean_rr_intervals_interpolate(rr, min_rr=0.3, max_rr=2.0, max_rel_change=0.2):
+def clean_rr_intervals(rr, min_rr=0.3, max_rr=2.0):
     rr = np.asarray(rr, dtype=float)
-
-    valid = (rr >= min_rr) & (rr <= max_rr)
-
-    for i in range(1, len(rr) - 1):
-        local_med = np.median(rr[i-1:i+2])
-        if local_med > 0:
-            rel_change = abs(rr[i] - local_med) / local_med
-            if rel_change > max_rel_change:
-                valid[i] = False
-
-    if valid.sum() < 3:
-        return np.asarray([], dtype=float)
-
-    rr_clean = rr.copy()
-    bad_idx = np.flatnonzero(~valid)
-    good_idx = np.flatnonzero(valid)
-
-    rr_clean[bad_idx] = np.interp(bad_idx, good_idx, rr[good_idx])
-
-    return rr_clean, valid
+    return rr[(rr >= min_rr) & (rr <= max_rr)]
 
 # =============================================================================
 # LF / HF POWER  (pure scipy, no HRV libraries)
@@ -82,7 +60,7 @@ def _estimate_lf_hf_power(rr_intervals,
     Pipeline (Task Force standard):
       1. Convert RR to milliseconds
       2. Build timestamps starting at t=0 (seconds)
-      3. Cubic-spline interpolate onto uniform 4 Hz grid
+      3. Linearly interpolate onto uniform 4 Hz grid
       4. Subtract mean (remove DC)
       5. Welch PSD with nperseg=full signal (= periodogram, max resolution)
       6. Trapezoid-integrate LF (0.04-0.15 Hz) and HF (0.15-0.40 Hz) → ms²
@@ -108,18 +86,8 @@ def _estimate_lf_hf_power(rr_intervals,
     if len(t_uniform) < 8:
         return 0.0, 0.0
 
-    interpolator = interp1d(
-        time_stamps, rr_ms, kind="quadratic",
-        bounds_error=False,
-        fill_value=(rr_ms[0], rr_ms[-1]),
-    )
-    rr_resampled = interpolator(t_uniform)
+    rr_resampled = np.interp(t_uniform, time_stamps, rr_ms)
     rr_resampled -= rr_resampled.mean()
-
-    # full-length Welch = periodogram, maximum frequency resolution
-    # Standard Welch-style PSD: Hann windows with 50% overlap
-    nperseg = len(rr_resampled)    
-    noverlap = nperseg // 2
 
     freqs, psd = welch(
         rr_resampled,
@@ -157,10 +125,10 @@ def _hrv_for_window(window_peaks, fs=DEFAULT_FS):
     if len(rr_raw) < MIN_RR_PER_WINDOW:
         return None   # not enough beats
 
-    rr, valid_mask = clean_rr_intervals_interpolate(rr_raw)
-    fraction_corrected = 1.0 - np.mean(valid_mask)
+    rr = clean_rr_intervals(rr_raw)
+    fraction_removed = 1.0 - (len(rr) / len(rr_raw))
 
-    if fraction_corrected > MAX_CLEAN_LOSS:
+    if fraction_removed > MAX_CLEAN_LOSS:
         return None
 
     if len(rr) < MIN_RR_PER_WINDOW:
