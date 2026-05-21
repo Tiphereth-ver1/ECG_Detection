@@ -7,8 +7,9 @@ from scipy.signal import butter, filtfilt, find_peaks, iirnotch, sosfiltfilt
 # The dataset is sampled at 100 Hz, so 1 sample = 10 ms.
 DEFAULT_FS = 100
 
-# Main branch settings. The main detector uses the 97th percentile of
-# abs(filtered ECG), which works for both upright and inverted QRS complexes.
+# Main branch settings. The default detector uses abs(filtered ECG), which works
+# for both upright and inverted QRS complexes.
+USE_ABS_MAIN_BRANCH = True
 MAIN_PERCENTILE = 97
 MAIN_REFRACTORY_SEC = 0.30
 
@@ -351,11 +352,19 @@ def _detect_qrs_all(raw, fs=DEFAULT_FS):
     filtered = preprocess_ecg(raw, fs)
     qrs_band = qrs_bandpass(raw, fs)
 
-    # Main branch finds QRS events from abs(filtered). Energy branch is mostly
-    # used as a backup for missed beats in long RR gaps.
-    main_peaks, abs_filtered, main_threshold = _main_abs_peak_candidates_debug(filtered, fs)
     energy_peaks, energy_integrated, energy_threshold = _energy_peak_candidates_debug(qrs_band, fs)
-    preliminary_peaks = _fill_long_gaps(main_peaks, energy_peaks, filtered, fs)
+
+    if USE_ABS_MAIN_BRANCH:
+        # Legacy path: abs(filtered) is the main detector and energy fills gaps.
+        main_peaks, abs_filtered, main_threshold = _main_abs_peak_candidates_debug(filtered, fs)
+        preliminary_peaks = _fill_long_gaps(main_peaks, energy_peaks, filtered, fs)
+    else:
+        # Current path: avoid the abs(filtered) detector and use the QRS energy
+        # branch directly as the candidate source.
+        main_peaks = np.asarray([], dtype=int)
+        abs_filtered = np.abs(filtered)
+        main_threshold = float("nan")
+        preliminary_peaks = _merge_close_peaks(energy_peaks, filtered, fs)
 
     quality_mask, noise_score = _quality_mask(
         raw,

@@ -11,12 +11,17 @@ from qrs_pipeline import (
     DEFAULT_FS,
     default_train_mat,
     detect_qrs,
+    load_recording,
     save_overlay_plot,
 )
 from qrs_debug_viewer import run_qrs_debug_viewer
 
 PROJECT_TRAIN_DATA = default_train_mat()
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "outputs" / "qrs_eval"
+
+
+def parse_length(length, raw_len=None):
+    return int(length)
 
 
 def calculate_hr_hrv(peaks):
@@ -383,6 +388,41 @@ def save_training_plots(mat_path, rows, summary, out_dir, worst_count=4):
     return outputs
 
 
+def save_qrs_overlays(mat_path, out_dir, patient="all", start=0, length=15_000, show_raw=False):
+    data = loadmat(mat_path)
+    n_records = len(data["ECG"].ravel())
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["MPLCONFIGDIR"] = str(out_dir / ".matplotlib")
+
+    if isinstance(patient, str) and patient.lower() == "all":
+        patient_numbers = range(1, n_records + 1)
+    else:
+        patient_numbers = [max(1, min(int(patient), n_records))]
+
+    outputs = []
+    for patient_number in patient_numbers:
+        raw, expert = load_recording(mat_path, patient_number - 1)
+        filtered, predicted = detect_qrs(raw, DEFAULT_FS)
+        window_length = parse_length(length, len(raw))
+        out_path = out_dir / f"record_{patient_number:02d}_qrs_overlay.png"
+        save_overlay_plot(
+            raw=raw,
+            expert=expert,
+            filtered=filtered,
+            predicted=predicted,
+            out_path=out_path,
+            record_number=patient_number,
+            start=start,
+            length=window_length,
+            show_raw=show_raw,
+        )
+        outputs.append(out_path)
+        print(f"Saved {out_path}")
+
+    return outputs
+
+
 def main():
     # CLI entry point. --viz opens the interactive viewer; otherwise the script
     # runs training-set evaluation.
@@ -394,9 +434,10 @@ def main():
     parser.add_argument("--max-len", type=int, default=None, help="optional crop for quick experiments")
     parser.add_argument("--worst-count", type=int, default=4)
     parser.add_argument("--viz", action="store_true", help="open interactive overlay viewer")
-    parser.add_argument("--patient", type=int, default=1, help="1-based record number for --viz")
+    parser.add_argument("--save-overlays", action="store_true", help="save QRS overlay PNGs for one or all records")
+    parser.add_argument("--patient", default="1", help="1-based record number, or 'all' for --save-overlays")
     parser.add_argument("--start", type=int, default=0)
-    parser.add_argument("--length", type=int, default=15_000)
+    parser.add_argument("--length", type=int, default=15_000, help="number of samples")
     parser.add_argument("--show-raw", action="store_true")
     args = parser.parse_args()
 
@@ -407,6 +448,17 @@ def main():
             start=args.start,
             length=args.length,
             max_len=args.max_len,
+            show_raw=args.show_raw,
+        )
+        return
+
+    if args.save_overlays:
+        save_qrs_overlays(
+            mat_path=args.mat,
+            out_dir=args.out_dir,
+            patient=args.patient,
+            start=args.start,
+            length=args.length,
             show_raw=args.show_raw,
         )
         return
