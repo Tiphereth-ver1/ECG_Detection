@@ -1,6 +1,8 @@
 # ECG QRS Detection
 
-This repository is for the BMET3997 major project ECG work. The current code focuses only on QRS peak detection on the training set. HRV calculation is intentionally not changed in this stage.
+This repository is for the BMET3997 major project ECG work. The current code
+contains the QRS detector, windowed HRV calculation, training-set evaluation,
+and helper scripts for filling and checking the test-set submission `.mat`.
 
 ## Assignment Requirements Covered Here
 
@@ -39,7 +41,7 @@ References used for the approach:
 - WFDB `correct_peaks` style post-processing idea.
 - ECG signal-quality/artifact assessment ideas.
 
-## What Changed In The Latest Cleanup
+## QRS Cleanup Snapshot - 2026-05-23
 
 - Removed the polarity detector and final peak refinement from the main QRS path.
 - Kept the main `abs(filtered ECG)` detector because it works for both upright and inverted beats.
@@ -71,7 +73,8 @@ dataSet/
   ProjectTestDataAnalysis.mat
 ```
 
-Only `ProjectTrainData.mat` is used by the current QRS training evaluation.
+`ProjectTrainData.mat` is used for local training-set evaluation. The test-set
+submission helpers read `ProjectTestData.mat` and `ProjectTestDataAnalysis.mat`.
 
 ## Run Training Evaluation
 
@@ -111,7 +114,7 @@ Generated files:
 - `sensitivity_vs_ppv.png`: Sensitivity vs PPV scatter plot.
 - `record_XX_overlay.png`: overlay plots for the worst records.
 
-Current full-training result from this detector:
+Training-set performance snapshot for this version:
 
 ```text
 Sensitivity: 0.996127
@@ -122,7 +125,60 @@ FP: 4832
 FN: 4342
 ```
 
-### Current branch — performance summary
+### Test-Set Performance Snapshot - 2026-05-23
+
+This is a dated snapshot for the current project version and should not be
+treated as a rolling "latest" result after future detector updates.
+
+- Date recorded: 2026-05-23, Australia/Sydney.
+- Version anchor: branch `main`, HEAD `fa8bd7d` when this section was written.
+- Source: test-set prediction result reported after running this version's
+  pipeline. The hidden test labels are not stored in this repository.
+
+QRS detection:
+
+```text
+Sensitivity = 0.995743
+PPV         = 0.995819
+F1          = 0.995781
+```
+
+HRV mean absolute percentage error:
+
+```text
+MAPE_avgRR        = 0.081861
+MAPE_sdRR         = 3.229323
+MAPE_RMSSD        = 9.419067
+MAPE_pNN50        = 11.655063
+MAPE_LF           = 20.650554
+MAPE_HF           = 23.786912
+MAPE_LF_HFratio   = 12.962603
+averageMAPE       = 11.683626
+```
+
+Comparison with the training-set snapshot above:
+
+| Metric | Trainset | Testset | Test - Train |
+| --- | ---: | ---: | ---: |
+| Sensitivity | 0.996127 | 0.995743 | -0.000384 |
+| PPV | 0.995692 | 0.995819 | +0.000127 |
+| F1 | 0.995909 | 0.995781 | -0.000128 |
+| MAPE_avgRR | 0.313610 | 0.081861 | -0.231749 |
+| MAPE_sdRR | 4.905944 | 3.229323 | -1.676621 |
+| MAPE_RMSSD | 10.834260 | 9.419067 | -1.415193 |
+| MAPE_pNN50 | 15.161347 | 11.655063 | -3.506284 |
+| MAPE_LF | 14.579588 | 20.650554 | +6.070966 |
+| MAPE_HF | 18.893936 | 23.786912 | +4.892976 |
+| MAPE_LF_HFratio | 13.549265 | 12.962603 | -0.586662 |
+| averageMAPE | 11.176850 | 11.683626 | +0.506776 |
+
+Interpretation: QRS detection generalizes almost unchanged from train to test.
+The F1 drop is only `0.000128`, while PPV is slightly higher on test. HRV is
+also stable overall: average MAPE increases by about `0.51` percentage points.
+The main test-set weakness is frequency-domain power (`LF`, `HF`), while the
+time-domain HRV metrics are better than the training snapshot.
+
+### Training-Set Interpretation - 2026-05-23
 
 Across all **35** training records, aggregated metrics against expert annotations
 (with **50 ms** tolerance) are: **Sensitivity 0.9961**, **PPV 0.9957**, **F1 0.9959**
@@ -181,13 +237,16 @@ Navigation:
 - `qrs_pipeline.py`: ECG filtering, QRS detection, missed-beat filling, signal-quality filtering, and overlay plotting.
 - `qrs_debug_viewer.py`: interactive debug viewer, layer toggles, sliders, record navigation, and scroll zoom.
 - `test.py`: command-line evaluation, CSV output, offset summaries, FP cluster summaries, and visualization outputs.
+- `processor.py`: fills the submission analysis `.mat` from saved QRS predictions and HRV metrics.
+- `visualize_submission.py`: validates and visualizes the filled test-set submission `.mat`.
+- `TECHNICAL_PIPELINE_2026-05-23.md`: dated technical description of the current pipeline.
+- `archive/`: historical and experimental scripts that are not part of the active pipeline.
 - `README.md`: project summary and run instructions.
 
 ## Current Scope
 
 This stage does not:
 
-- calculate HRV parameters,
-- generate the final test-set submission `.mat`,
-- modify `hrvcalc.py`,
-- use any QRS detection toolbox/library.
+- use any QRS detection toolbox/library,
+- use record-specific detector rules,
+- train a black-box model.
