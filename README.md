@@ -20,18 +20,19 @@ detection toolbox or external QRS detector.
 
 1. Apply a 50 Hz notch filter.
 2. Apply a broad ECG bandpass filter for final peak placement.
-3. Detect main candidates from local peaks in `abs(filtered ECG)`, so both upright and inverted QRS complexes can be detected.
-4. Run a second `5-20 Hz` QRS-energy branch using derivative, squaring, and moving-window integration.
-5. Use the energy branch only to fill suspiciously long RR gaps. It is not used as the only detector because it is weaker on the full training set.
-6. Mark noisy windows with a simple signal-quality check using raw range, filtered standard deviation, energy saturation, and candidate density.
-7. Add a conservative low-confidence noise gate. This uses `qrs_snr`, meaning the median detected-QRS height divided by the median background height in the same window. It is not a physical SNR. A window is removed only when `qrs_snr` is low, energy candidates are dense, and the neighboring window is also low confidence.
-8. Merge very close detections using refractory and shape-strength cleanup.
+3. Run a `5-20 Hz` QRS-energy branch using derivative, squaring, moving-window integration, and local QRS-band peak refinement.
+4. Use the QRS-energy branch as the current candidate source, then reject broad-wave candidates that do not have enough nearby QRS-band support.
+5. Mark noisy windows with a signal-quality check using raw range, filtered standard deviation, energy saturation, candidate density, and local QRS contrast.
+6. Remove close duplicate detections with shape-strength cleanup.
+7. Apply waveform-based late positive-lobe alignment for records that contain many biphasic complexes whose expert marks land on the later positive lobe.
+8. Apply adaptive RR cleanup to remove dense half-RR artifact duplicates.
+9. Rescue isolated high-confidence QRS peaks that were removed by earlier quality/shape/RR gates.
+10. Apply a conservative final morphology cleanup for weak residual false positives, unless the late-alignment trigger is active.
 
-The earlier polarity/refinement experiment was removed from the main path. It
+The earlier polarity/refinement experiment remains out of the main path. It
 helped a few screenshots but often chose the wrong side of biphasic QRS
-complexes, especially when morphology changed. Removing it slightly improved the
-full training F1 and should generalize better than fitting record-specific peak
-direction rules.
+complexes. The current alignment branch is triggered by record-level waveform
+statistics rather than record ID.
 
 References used for the approach:
 
@@ -117,12 +118,12 @@ Generated files:
 Training-set performance snapshot for this version:
 
 ```text
-Sensitivity: 0.996127
-PPV: 0.995692
-F1: 0.995909
-TP: 1116710
-FP: 4832
-FN: 4342
+Sensitivity: 0.996686
+PPV: 0.997314
+F1: 0.997000
+TP: 1117337
+FP: 3009
+FN: 3715
 ```
 
 ### Test-Set Performance Snapshot - 2026-05-23
@@ -197,6 +198,60 @@ better.
 The main remaining weak points are noisy sections where the expert labels stop,
 and morphology changes such as record 17 later in the signal.
 
+## Pipeline And Performance Snapshot - 2026-05-31
+
+Version anchor: branch `main`, commit `2a6bad2`.
+
+This version adds a post-processing pipeline around the QRS-energy candidate
+source:
+
+- QRS-band veto for broad T-wave/slow-wave candidates.
+- Late positive-lobe alignment for repeated biphasic morphology shifts.
+- Adaptive RR cleanup for dense half-RR duplicate detections.
+- Conservative quality rescue for isolated strong QRS peaks removed by earlier gates.
+- Final morphology cleanup for weak residual false positives.
+- Debug viewer layers for `Removed QRS-band`, `Aligned late`, `Removed RR`, `Rescued quality`, and `Removed final`.
+- Global log-linear HRV output calibration, using one coefficient pair per HRV metric and no record-specific rules.
+
+Training-set QRS performance against expert annotations, 50 ms tolerance:
+
+```text
+Sensitivity: 0.996686
+PPV: 0.997314
+F1: 0.997000
+TP: 1117337
+FP: 3009
+FN: 3715
+```
+
+Compared with the 2026-05-23 snapshot:
+
+```text
+F1: 0.995909 -> 0.997000
+TP: 1116710 -> 1117337
+FP: 4832 -> 3009
+FN: 4342 -> 3715
+```
+
+Training-set HRV comparison against `documents/training_expert_hrv_reference.csv`:
+
+```text
+MAPE_avgRR        = 0.335173
+MAPE_sdRR         = 2.501315
+MAPE_RMSSD        = 6.274485
+MAPE_pNN50        = 13.262251
+MAPE_LF           = 13.650064
+MAPE_HF           = 17.271437
+MAPE_LF_HFratio   = 12.247821
+averageMAPE       = 9.363221
+```
+
+The largest QRS gains are concentrated in the known difficult records:
+record 17 improves from `0.950186` to `0.963950` F1, record 25 from `0.971250`
+to `0.976390`, record 33 from `0.988485` to `0.991383`, and record 24 from
+`0.987006` to `0.989778`. The main remaining weak areas are long artifact
+sections with expert labels and record 17's late morphology change.
+
 ## Interactive Overlay Viewer
 
 Open a record in an interactive matplotlib viewer:
@@ -222,8 +277,10 @@ Useful flags:
 
 The viewer can draw raw ECG, filtered ECG, `abs(filtered)`, main threshold, QRS
 energy, energy threshold, predicted QRS, expert QRS, main candidates, energy
-candidates, noisy-window mask, noise score, removed noise peaks, and removed
-shape peaks. Layers can be hidden from the checkbox panel.
+candidates, noisy-window mask, noise score, removed noise peaks, removed shape
+peaks, removed QRS-band veto peaks, late-aligned peaks, removed RR peaks,
+quality-rescued peaks, and final morphology removals. Layers can be hidden from
+the checkbox panel.
 
 Navigation:
 
@@ -239,7 +296,8 @@ Navigation:
 - `test.py`: command-line evaluation, CSV output, offset summaries, FP cluster summaries, and visualization outputs.
 - `processor.py`: fills the submission analysis `.mat` from saved QRS predictions and HRV metrics.
 - `visualize_submission.py`: validates and visualizes the filled test-set submission `.mat`.
-- `TECHNICAL_PIPELINE_2026-05-23.md`: dated technical description of the current pipeline.
+- `TECHNICAL_PIPELINE_2026-05-23.md`: dated technical description of the 2026-05-23 pipeline.
+- `TECHNICAL_PIPELINE_2026-05-31.md`: dated technical description of the current post-processing pipeline and performance snapshot.
 - `archive/`: historical and experimental scripts that are not part of the active pipeline.
 - `README.md`: project summary and run instructions.
 
