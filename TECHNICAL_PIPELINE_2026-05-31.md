@@ -159,8 +159,8 @@ the trapezoid rule.
 
 ### HRV Output Calibration
 
-This version can optionally apply a global log-linear output calibration with
-`--hrv-calibration`:
+This version applies a global log-linear output calibration by default. Use
+`--no-hrv-calibration` to disable it for audit runs:
 
 ```text
 log(reference) = slope * log(raw_estimate) + intercept
@@ -168,8 +168,7 @@ log(reference) = slope * log(raw_estimate) + intercept
 
 There is one slope/intercept pair per HRV metric. There are no record-specific
 calibration rules. The calibration follows the same low-degree output
-correction idea as the project presentation architecture. The CLI default is
-uncalibrated HRV output.
+correction idea as the project presentation architecture.
 
 ## Evaluation Protocol
 
@@ -179,13 +178,13 @@ Training QRS evaluation is run with:
 python3 -B test.py --eval-train
 ```
 
-Full QRS + HRV comparison is run with:
+Full QRS + calibrated HRV comparison is run with:
 
 ```bash
 python3 -B test.py --eval-train --compare-hrv --save-plots --worst-count 8
 ```
 
-Add `--hrv-calibration` to enable the optional global HRV output calibration.
+Add `--no-hrv-calibration` to disable the global HRV output calibration.
 
 QRS matching uses a 50 ms tolerance, equal to 5 samples at 100 Hz. Matching is
 one-to-one, so each predicted peak and expert peak can contribute to at most one
@@ -235,7 +234,7 @@ Largest per-record F1 gains compared with the previous snapshot:
 | 12 | 0.994628 | 0.996872 | +0.002245 | FP reduction in noisy windows |
 
 Training-set HRV comparison against
-`documents/training_expert_hrv_reference.csv` with `--hrv-calibration`:
+`documents/training_expert_hrv_reference.csv` with calibration enabled:
 
 ```text
 MAPE_avgRR        = 0.335173
@@ -248,9 +247,44 @@ MAPE_LF_HFratio   = 12.247821
 averageMAPE       = 9.363221
 ```
 
-Running the default uncalibrated HRV calculation gives `averageMAPE = 9.669`,
-so the optional global calibration improves the HRV target without being solely
+Running with `--no-hrv-calibration` gives `averageMAPE = 9.669`,
+so the global calibration improves the HRV target without being solely
 responsible for passing it.
+
+## Hidden Test-Set Result
+
+The hidden test-set result reported by Shilei for this version is:
+
+```text
+Sensitivity = 0.994124
+PPV         = 0.994533
+F1          = 0.994328
+
+MAPE_avgRR        = 0.048350
+MAPE_sdRR         = 1.995051
+MAPE_RMSSD        = 10.446275
+MAPE_pNN50        = 10.022548
+MAPE_LF           = 18.538174
+MAPE_HF           = 23.922575
+MAPE_LF_HFratio   = 13.104062
+averageMAPE       = 11.153862
+```
+
+Train versus hidden test:
+
+| Metric | Trainset | Hidden testset | Test - Train |
+| --- | ---: | ---: | ---: |
+| Sensitivity | 0.996686 | 0.994124 | -0.002562 |
+| PPV | 0.997314 | 0.994533 | -0.002781 |
+| F1 | 0.997000 | 0.994328 | -0.002672 |
+| averageMAPE | 9.363221 | 11.153862 | +1.790641 |
+
+This result indicates overfitting. The added post-processing stack improves the
+training labels but does not generalize to the hidden test set: F1 falls below
+the `> 0.997` goal and averageMAPE rises above the `< 10` goal. The most likely
+risk areas are the late positive-lobe alignment, final morphology cleanup, and
+global HRV calibration, which all improve training summaries but need stricter
+cross-record validation before being used for submission.
 
 ## Debug Viewer Layers
 

@@ -211,7 +211,7 @@ source:
 - Conservative quality rescue for isolated strong QRS peaks removed by earlier gates.
 - Final morphology cleanup for weak residual false positives.
 - Debug viewer layers for `Removed QRS-band`, `Aligned late`, `Removed RR`, `Rescued quality`, and `Removed final`.
-- Optional global log-linear HRV output calibration, enabled with `--hrv-calibration`, using one coefficient pair per HRV metric and no record-specific rules.
+- Global log-linear HRV output calibration enabled by default, with `--no-hrv-calibration` available for audit, using one coefficient pair per HRV metric and no record-specific rules.
 
 Training-set QRS performance against expert annotations, 50 ms tolerance:
 
@@ -251,6 +251,41 @@ record 17 improves from `0.950186` to `0.963950` F1, record 25 from `0.971250`
 to `0.976390`, record 33 from `0.988485` to `0.991383`, and record 24 from
 `0.987006` to `0.989778`. The main remaining weak areas are long artifact
 sections with expert labels and record 17's late morphology change.
+
+### Hidden Test-Set Result - 2026-05-31
+
+The hidden test-set result reported by Shilei for this version is:
+
+```text
+Sensitivity = 0.994124
+PPV         = 0.994533
+F1          = 0.994328
+
+MAPE_avgRR        = 0.048350
+MAPE_sdRR         = 1.995051
+MAPE_RMSSD        = 10.446275
+MAPE_pNN50        = 10.022548
+MAPE_LF           = 18.538174
+MAPE_HF           = 23.922575
+MAPE_LF_HFratio   = 13.104062
+averageMAPE       = 11.153862
+```
+
+Compared with the training snapshot above:
+
+| Metric | Trainset | Hidden testset | Test - Train |
+| --- | ---: | ---: | ---: |
+| Sensitivity | 0.996686 | 0.994124 | -0.002562 |
+| PPV | 0.997314 | 0.994533 | -0.002781 |
+| F1 | 0.997000 | 0.994328 | -0.002672 |
+| averageMAPE | 9.363221 | 11.153862 | +1.790641 |
+
+Interpretation: this version overfits the training set. The post-processing
+pipeline improves the labeled training records, especially records 17, 24, 25,
+and 33, but the hidden test F1 drops below both the target and the older
+2026-05-23 test snapshot. The HRV averageMAPE also misses the `< 10` target on
+hidden test. Future work should back off the late-stage cleanup/alignment stack
+or validate it with stricter leave-record-out style checks before submission.
 
 ## Interactive Overlay Viewer
 
