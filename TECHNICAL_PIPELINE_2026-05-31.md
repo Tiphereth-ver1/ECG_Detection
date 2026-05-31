@@ -159,7 +159,8 @@ the trapezoid rule.
 
 ### HRV Output Calibration
 
-This version applies a global log-linear output calibration:
+This version can optionally apply a global log-linear output calibration with
+`--hrv-calibration`:
 
 ```text
 log(reference) = slope * log(raw_estimate) + intercept
@@ -167,7 +168,8 @@ log(reference) = slope * log(raw_estimate) + intercept
 
 There is one slope/intercept pair per HRV metric. There are no record-specific
 calibration rules. The calibration follows the same low-degree output
-correction idea as the project presentation architecture.
+correction idea as the project presentation architecture. The CLI default is
+uncalibrated HRV output.
 
 ## Evaluation Protocol
 
@@ -182,6 +184,8 @@ Full QRS + HRV comparison is run with:
 ```bash
 python3 -B test.py --eval-train --compare-hrv --save-plots --worst-count 8
 ```
+
+Add `--hrv-calibration` to enable the optional global HRV output calibration.
 
 QRS matching uses a 50 ms tolerance, equal to 5 samples at 100 Hz. Matching is
 one-to-one, so each predicted peak and expert peak can contribute to at most one
@@ -230,8 +234,8 @@ Largest per-record F1 gains compared with the previous snapshot:
 | 24 | 0.987006 | 0.989778 | +0.002772 | residual FP cleanup |
 | 12 | 0.994628 | 0.996872 | +0.002245 | FP reduction in noisy windows |
 
-Current training-set HRV comparison against
-`documents/training_expert_hrv_reference.csv`:
+Training-set HRV comparison against
+`documents/training_expert_hrv_reference.csv` with `--hrv-calibration`:
 
 ```text
 MAPE_avgRR        = 0.335173
@@ -244,9 +248,9 @@ MAPE_LF_HFratio   = 12.247821
 averageMAPE       = 9.363221
 ```
 
-Running the same HRV calculation with `--no-hrv-calibration` gives
-`averageMAPE = 9.669`, so the global calibration improves the HRV target
-without being solely responsible for passing it.
+Running the default uncalibrated HRV calculation gives `averageMAPE = 9.669`,
+so the optional global calibration improves the HRV target without being solely
+responsible for passing it.
 
 ## Debug Viewer Layers
 

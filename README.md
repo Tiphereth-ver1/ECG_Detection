@@ -211,7 +211,7 @@ source:
 - Conservative quality rescue for isolated strong QRS peaks removed by earlier gates.
 - Final morphology cleanup for weak residual false positives.
 - Debug viewer layers for `Removed QRS-band`, `Aligned late`, `Removed RR`, `Rescued quality`, and `Removed final`.
-- Global log-linear HRV output calibration, using one coefficient pair per HRV metric and no record-specific rules.
+- Optional global log-linear HRV output calibration, enabled with `--hrv-calibration`, using one coefficient pair per HRV metric and no record-specific rules.
 
 Training-set QRS performance against expert annotations, 50 ms tolerance:
 

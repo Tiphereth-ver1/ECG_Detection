@@ -11,6 +11,7 @@ from scipy.signal import welch
 
 from qrs_pipeline import (
     DEFAULT_FS,
+    default_test_mat,
     default_train_mat,
     detect_qrs,
     load_recording,
@@ -19,6 +20,7 @@ from qrs_pipeline import (
 from qrs_debug_viewer import run_qrs_debug_viewer
 
 PROJECT_TRAIN_DATA = default_train_mat()
+PROJECT_TEST_DATA = default_test_mat()
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "outputs" / "qrs_eval"
 DEFAULT_HRV_REFERENCE = Path(__file__).resolve().parent / "documents" / "training_expert_hrv_reference.csv"
 
@@ -314,7 +316,7 @@ def evaluate_training_set(
     verbose=True,
     include_hrv=False,
     hrv_source="predicted",
-    calibrate_hrv=True,
+    calibrate_hrv=False,
 ):
     # Evaluate every training record against QRSexpert. HRV is optional because
     # QRS tuning usually only needs the detection metrics.
@@ -433,6 +435,59 @@ def evaluate_training_set(
     )
 
     return rows, summary
+
+
+def generate_record_outputs(
+    mat_path=PROJECT_TEST_DATA,
+    max_len=None,
+    verbose=True,
+    include_hrv=False,
+    calibrate_hrv=False,
+):
+    # Generate predictions and optional HRV for datasets that do not include
+    # expert QRS annotations, such as the project test set.
+    data = loadmat(mat_path)
+    ecg_records = data["ECG"].ravel()
+
+    rows = []
+    all_predictions = {}
+
+    for record_number, raw_cell in enumerate(ecg_records, start=1):
+        raw = raw_cell.ravel().astype(float)
+        if max_len is not None:
+            raw = raw[:max_len]
+
+        _filtered, predicted = detect_qrs(raw, DEFAULT_FS)
+        row = {
+            "record": record_number,
+            "pred_count": len(predicted),
+        }
+
+        if include_hrv:
+            hrv_values = compute_windowed_hrv(predicted, len(raw))
+            if calibrate_hrv:
+                hrv_values = calibrate_hrv_metrics(hrv_values)
+            row.update(hrv_values)
+
+        rows.append(row)
+        all_predictions[record_number] = predicted
+
+        if verbose:
+            message = f"Record {record_number:02d}: pred={row['pred_count']}"
+            if include_hrv:
+                message += (
+                    f" HRV: avgRR={row['avgRR']:.1f} "
+                    f"RMSSD={row['RMSSD']:.1f} "
+                    f"pNN50={row['pNN50']:.1f} "
+                    f"LF/HF={row['LF_HFratio']:.2f}"
+                )
+            print(message)
+
+    np.save("predictions.npy", all_predictions, allow_pickle=True)
+    pd.DataFrame(rows).to_csv("metrics.csv", index=False)
+    print(f"\nGenerated outputs for {len(rows)} records")
+
+    return rows
 
 
 def save_metrics_csv(rows, summary, out_dir):
@@ -750,11 +805,20 @@ def main():
         help="which QRS peaks to use for HRV on training data",
     )
     parser.add_argument("--hrv-reference", type=Path, default=DEFAULT_HRV_REFERENCE)
-    parser.add_argument(
-        "--no-hrv-calibration",
+    calibration_group = parser.add_mutually_exclusive_group()
+    calibration_group.add_argument(
+        "--hrv-calibration",
+        dest="hrv_calibration",
         action="store_true",
-        help="disable global log-linear HRV output calibration",
+        help="enable global log-linear HRV output calibration",
     )
+    calibration_group.add_argument(
+        "--no-hrv-calibration",
+        dest="hrv_calibration",
+        action="store_false",
+        help="disable global log-linear HRV output calibration (default)",
+    )
+    parser.set_defaults(hrv_calibration=False)
     args = parser.parse_args()
 
     if args.viz:
@@ -780,13 +844,26 @@ def main():
         return
 
     include_hrv = args.hrv or args.compare_hrv
-    rows, summary = evaluate_training_set(
-        args.mat,
-        max_len=args.max_len,
-        include_hrv=include_hrv,
-        hrv_source=args.hrv_source,
-        calibrate_hrv=not args.no_hrv_calibration,
-    )
+    has_expert_qrs = "QRSexpert" in loadmat(args.mat)
+
+    if has_expert_qrs:
+        rows, summary = evaluate_training_set(
+            args.mat,
+            max_len=args.max_len,
+            include_hrv=include_hrv,
+            hrv_source=args.hrv_source,
+            calibrate_hrv=args.hrv_calibration,
+        )
+    else:
+        if args.compare_hrv:
+            raise ValueError("--compare-hrv requires a training MAT file with QRSexpert annotations")
+        rows = generate_record_outputs(
+            args.mat,
+            max_len=args.max_len,
+            include_hrv=include_hrv,
+            calibrate_hrv=args.hrv_calibration,
+        )
+        summary = None
 
     if include_hrv:
         hrv_path = save_hrv_metrics_csv(rows, args.out_dir, args.hrv_source)
@@ -814,7 +891,7 @@ def main():
         print(f"Saved HRV comparison: {detail_path}")
         print(f"Saved HRV comparison summary: {summary_path}")
 
-    if args.save_plots or args.eval_train:
+    if summary is not None and (args.save_plots or args.eval_train):
         if args.save_plots:
             outputs = save_training_plots(
                 args.mat,
