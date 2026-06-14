@@ -7,9 +7,8 @@ from scipy.signal import butter, filtfilt, find_peaks, iirnotch, sosfiltfilt
 # The dataset is sampled at 100 Hz, so 1 sample = 10 ms.
 DEFAULT_FS = 100
 
-# Main branch settings. The default detector uses abs(filtered ECG), which works
-# for both upright and inverted QRS complexes.
-USE_ABS_MAIN_BRANCH = True
+# Main branch settings. The detector uses abs(filtered ECG), which works for
+# both upright and inverted QRS complexes.
 MAIN_PERCENTILE = 97
 MAIN_REFRACTORY_SEC = 0.30
 
@@ -25,7 +24,7 @@ MIN_GAP_SEC = 0.45
 # record-specific rules.
 QUALITY_WINDOW_SEC = 5.0
 QUALITY_STEP_SEC = 2.5
-QUALITY_PAD_SEC = 0.0
+QUALITY_PAD_SEC = 0.50
 RAW_RANGE_BIG = 12000
 FILTERED_STD_BIG = 1300
 ABS_BIG = 5000
@@ -38,55 +37,111 @@ RAW_RANGE_ENERGY = 9000
 QRS_SNR_LOW = 4.25
 QRS_SNR_MIN_PEAKS = 4
 QRS_SNR_MIN_ENERGY_PEAKS = 10
+OSC_NOISE_MIN_PEAKS = 7
+OSC_NOISE_MIN_ENERGY_PEAKS = 14
+OSC_NOISE_MIN_ZERO_CROSSINGS = 95
+OSC_NOISE_QRS_SNR_LOW = 6.0
+OSC_NOISE_MIN_FILTERED_STD = 450
+OSC_NOISE_MAX_FILTERED_STD = 1000
+OSC_NOISE_MAX_RAW_RANGE = 9000
+OSC_NOISE_MAX_QRS_P95 = 1800
+OSCILLATORY_NOISE_SCORE = 4.0
+DENSE_LOW_CONTRAST_MIN_PEAKS = 7
+DENSE_LOW_CONTRAST_MIN_ENERGY_PEAKS = 14
+DENSE_LOW_CONTRAST_MIN_ZERO_CROSSINGS = 80
+DENSE_LOW_CONTRAST_MAX_ZERO_CROSSINGS = 98
+DENSE_LOW_CONTRAST_MIN_ABS_MEDIAN = 380
+DENSE_LOW_CONTRAST_MIN_FILTERED_STD = 700
+DENSE_LOW_CONTRAST_MAX_FILTERED_STD = 1350
+DENSE_LOW_CONTRAST_MAX_RAW_RANGE = 9500
+DENSE_LOW_CONTRAST_MAX_QRS_P95 = 1400
+DENSE_LOW_CONTRAST_MAX_QRS_SNR = 5.3
+DENSE_LOW_CONTRAST_MIN_QRS_MEDIAN = 150
 SHAPE_REFRACTORY_SEC = 0.32
+SHAPE_SCORE_QRS_WEIGHT = 1.50
+SHAPE_SCORE_SLOPE_WEIGHT = 0.75
 
-# T-wave suppression. Some records have T waves whose broad ECG amplitude is
-# larger than the QRS peak. The main abs(filtered) branch can then lock onto a
-# slow T wave. Keep only candidates that have enough nearby 5-20 Hz QRS-band
-# strength relative to the current candidate set.
-QRS_BAND_VETO_RATIO = 0.235
-QRS_BAND_VETO_RADIUS_SEC = 0.04
-
-# Expert annotations in one morphology-change pattern land on the later
-# positive lobe of a biphasic complex rather than on the earlier negative
-# valley. The trigger is record-level and waveform-based: only records with many
-# late positive-lobe candidates enable this alignment branch.
-LATE_ALIGN_SCAN_START_SEC = 20_000
-LATE_ALIGN_TRIGGER_START_SEC = 22_000
-LATE_ALIGN_MIN_COUNT = 500
-LATE_ALIGN_MIN_FRACTION = 0.08
-LATE_ALIGN_POS_START_SEC = 0.15
-LATE_ALIGN_POS_END_SEC = 0.40
-LATE_ALIGN_CENTER_RADIUS_SEC = 0.08
-LATE_ALIGN_POS_EARLY_RATIO = 1.2
-LATE_ALIGN_POS_VALLEY_RATIO = 0.25
+# Early-negative alignment is active but guarded at record level. It only fires
+# for records with a sustained late-positive/T-like morphology pattern.
+EARLY_ALIGN_LOOKBACK_MIN_SEC = 0.18
+EARLY_ALIGN_LOOKBACK_MAX_SEC = 0.34
+EARLY_ALIGN_MIN_CURRENT_QRS = 70
+EARLY_ALIGN_MIN_EARLY_QRS = 70
+EARLY_ALIGN_MIN_QRS_RATIO = 0.65
+EARLY_ALIGN_MIN_FILTERED_DELTA = 80
+EARLY_ALIGN_MIN_COUNT = 250
+EARLY_ALIGN_MIN_FRACTION = 0.03
 
 # Final sequence cleanup. This is a record-adaptive refractory layer: records
 # with dense artifact clusters often have extra peaks at about half the local RR
 # interval. Keep the stronger local QRS shape when two detections are too close
-# for that record's rhythm.
+# for that record's rhythm. This also protects HRV metrics from short-RR false
+# positives in noisy windows.
 ADAPTIVE_RR_MIN_SEC = 0.45
 ADAPTIVE_RR_FACTOR = 0.50
 ADAPTIVE_RR_QRS_WEIGHT = 1.00
 
-# Conservative recovery from the quality gate. Some low-background windows are
-# rejected because they border obvious artifact, but still contain isolated QRS
-# complexes. Only restore peaks that are far from an accepted detection and
-# have strong local QRS-band support over a quiet broad-band baseline.
-QUALITY_RESCUE_MIN_NEAREST_SEC = 0.30
-QUALITY_RESCUE_MIN_QRS_BAND = 250
-QUALITY_RESCUE_MAX_ABS_MEDIAN = 150
-QUALITY_RESCUE_MAX_QRS_MEDIAN = 60
+# Very narrow final duplicate cleanup. Do not raise the global adaptive RR
+# threshold because training and HRV include real 0.45-0.50 s RR intervals.
+# Instead, only remove the weaker peak from a close pair when it is much weaker
+# than its neighbor and sits in a locally oscillatory QRS-band segment.
+WEAK_SHORT_RR_MAX_GAP_SEC = 0.56
+WEAK_SHORT_RR_MAX_SCORE_RATIO = 0.35
+WEAK_SHORT_RR_MAX_WEAK_SCORE = 1500
+WEAK_SHORT_RR_MIN_ZERO_CROSSINGS = 13
+WEAK_SHORT_RR_SCORE_RADIUS_SEC = 0.08
+WEAK_SHORT_RR_PAIR_PAD_SEC = 0.15
 
-# Final morphology cleanup for residual false positives. These rules are
-# intentionally conservative: either the peak sits in a noisy high-background
-# segment with weak QRS support, or the peak itself is extremely weak in both
-# broad ECG and QRS-band views.
-FINAL_NOISY_QRS_MAX = 800
-FINAL_NOISY_FILTERED_MAX = 2000
-FINAL_NOISY_ABS_MEDIAN_MIN = 200
-FINAL_WEAK_QRS_MAX = 100
-FINAL_WEAK_FILTERED_MAX = 150
+# Local recovery for QRS complexes sitting next to artifact. The broad quality
+# mask can reject a whole 5-second block when an artifact crosses it, but clear,
+# narrow QRS peaks near the artifact edge should still be restored.
+ARTIFACT_RESCUE_MIN_NEAREST_SEC = 0.30
+ARTIFACT_RESCUE_MIN_NOISE_SCORE = 2.5
+ARTIFACT_RESCUE_MIN_QRS_BAND = 1200
+ARTIFACT_RESCUE_MIN_FILTERED = 2000
+ARTIFACT_RESCUE_MAX_ABS_MEDIAN = 520
+ARTIFACT_RESCUE_MAX_RAW_RANGE = 12000
+ARTIFACT_RESCUE_MAX_FILTERED_STD = 1600
+ARTIFACT_RESCUE_MIN_CONTRAST = 4.5
+ARTIFACT_RESCUE_STRONG_QRS_BAND = 2200
+ARTIFACT_RESCUE_STRONG_FILTERED = 3200
+ARTIFACT_RESCUE_MAX_STRONG_FILTERED = 7000
+ARTIFACT_RESCUE_MAX_STRONG_QRS_BAND = 4500
+ARTIFACT_RESCUE_MAX_HALF_WIDTH = 4
+LOW_AMP_RESCUE_MIN_QRS_BAND = 150
+LOW_AMP_RESCUE_MIN_FILTERED = 275
+LOW_AMP_RESCUE_MAX_ABS_MEDIAN = 120
+LOW_AMP_RESCUE_MAX_RAW_RANGE = 1200
+LOW_AMP_RESCUE_MAX_FILTERED_STD = 180
+LOW_AMP_RESCUE_MIN_CONTRAST = 3.2
+MEDIUM_AMP_RESCUE_MIN_QRS_BAND = 500
+MEDIUM_AMP_RESCUE_MIN_FILTERED = 850
+MEDIUM_AMP_RESCUE_MAX_ABS_MEDIAN = 280
+MEDIUM_AMP_RESCUE_MAX_RAW_RANGE = 3300
+MEDIUM_AMP_RESCUE_MAX_FILTERED_STD = 520
+MEDIUM_AMP_RESCUE_MIN_CONTRAST = 5.0
+RHYTHM_RESCUE_MIN_GAP_SEC = 0.43
+RHYTHM_RESCUE_MAX_GAP_SEC = 1.50
+RHYTHM_RESCUE_MAX_GAP_RATIO = 1.85
+RHYTHM_RESCUE_MIN_QRS_BAND = 1000
+RHYTHM_RESCUE_MAX_QRS_BAND = 5000
+RHYTHM_RESCUE_MIN_FILTERED = 1200
+RHYTHM_RESCUE_MAX_FILTERED = 9000
+RHYTHM_RESCUE_MAX_ABS_MEDIAN = 650
+RHYTHM_RESCUE_MAX_RAW_RANGE = 13000
+RHYTHM_RESCUE_MAX_FILTERED_STD = 2800
+RHYTHM_RESCUE_MIN_CONTRAST = 5.0
+RHYTHM_RESCUE_MAX_HALF_WIDTH = 4
+MILD_MASK_RHYTHM_RESCUE_MAX_NOISE_SCORE = 1.5
+MILD_MASK_RHYTHM_RESCUE_MIN_QRS_BAND = 250
+MILD_MASK_RHYTHM_RESCUE_MAX_QRS_BAND = 900
+MILD_MASK_RHYTHM_RESCUE_MIN_FILTERED = 400
+MILD_MASK_RHYTHM_RESCUE_MAX_FILTERED = 900
+MILD_MASK_RHYTHM_RESCUE_MAX_ABS_MEDIAN = 160
+MILD_MASK_RHYTHM_RESCUE_MAX_RAW_RANGE = 1600
+MILD_MASK_RHYTHM_RESCUE_MAX_FILTERED_STD = 230
+MILD_MASK_RHYTHM_RESCUE_MIN_CONTRAST = 3.4
+MILD_MASK_RHYTHM_RESCUE_MAX_HALF_WIDTH = 6
 
 
 def default_train_mat():
@@ -94,9 +149,26 @@ def default_train_mat():
     return Path(__file__).resolve().parent / "dataSet" / "ProjectTrainData.mat"
 
 def default_test_mat():
-    """Return the default training .mat path used by the CLI and viewer."""
+    """Return the default test .mat path used by the final generator."""
     return Path(__file__).resolve().parent / "dataSet" / "ProjectTestData.mat"
 
+
+
+
+def qrs_settings():
+    return {
+        "MAIN_PERCENTILE": MAIN_PERCENTILE,
+        "QUALITY_PAD_SEC": QUALITY_PAD_SEC,
+        "ARTIFACT_QRS_RESCUE": True,
+        "EARLY_NEGATIVE_ALIGNMENT": True,
+        "ADAPTIVE_RR_CLEANUP": True,
+        "WEAK_SHORT_RR_CLEANUP": True,
+        "RHYTHM_RESCUE_MIN_GAP_SEC": RHYTHM_RESCUE_MIN_GAP_SEC,
+        "OSCILLATORY_NOISE_SCORE": OSCILLATORY_NOISE_SCORE,
+        "DENSE_LOW_CONTRAST_MIN_PEAKS": DENSE_LOW_CONTRAST_MIN_PEAKS,
+        "DENSE_LOW_CONTRAST_MAX_QRS_SNR": DENSE_LOW_CONTRAST_MAX_QRS_SNR,
+        "tolerance_ms": 50,
+    }
 
 def _notch_filter(raw, fs=DEFAULT_FS):
     """Remove 50 Hz power-line noise before the broader ECG filters."""
@@ -127,42 +199,6 @@ def qrs_bandpass(raw, fs=DEFAULT_FS):
     # P/T waves. This follows the same idea as Pan-Tompkins/XQRS style energy.
     sos_qrs = butter(2, [5, 20], btype="bandpass", fs=fs, output="sos")
     return sosfiltfilt(sos_qrs, x)
-
-
-def _main_abs_peak_candidates(filtered, fs=DEFAULT_FS):
-    """Find the main QRS event candidates from abs(filtered ECG)."""
-    strength = np.abs(filtered)
-    threshold = np.percentile(strength, MAIN_PERCENTILE)
-    distance = int(MAIN_REFRACTORY_SEC * fs)
-    peaks, _ = find_peaks(strength, height=threshold, distance=distance)
-    return peaks.astype(int)
-
-
-def _energy_peak_candidates(qrs_band, fs=DEFAULT_FS):
-    """Find QRS-like events from derivative-squared moving-window energy."""
-    derivative = np.diff(qrs_band, prepend=qrs_band[0])
-    window = max(1, int(0.15 * fs))
-    energy = derivative * derivative
-    integrated = np.convolve(energy, np.ones(window) / window, mode="same")
-
-    # Median + MAD gives a simple adaptive threshold that is less affected by
-    # a few very large artifacts than mean + standard deviation.
-    mid = np.median(integrated)
-    mad = np.median(np.abs(integrated - mid))
-    threshold = mid + 3.5 * mad
-    distance = int(ENERGY_REFRACTORY_SEC * fs)
-    candidates, _ = find_peaks(integrated, height=threshold, distance=distance)
-
-    radius = int(REFINE_SEC * fs)
-    peaks = []
-    for candidate in candidates:
-        lo = max(0, candidate - radius)
-        hi = min(len(qrs_band), candidate + radius + 1)
-        # The energy peak marks the QRS region, not always the exact sample.
-        # Move it to the strongest nearby QRS-band point.
-        peaks.append(lo + int(np.argmax(np.abs(qrs_band[lo:hi]))))
-
-    return np.asarray(sorted(set(peaks)), dtype=int), integrated
 
 
 def _main_abs_peak_candidates_debug(filtered, fs=DEFAULT_FS):
@@ -258,9 +294,8 @@ def _quality_mask(raw, filtered, qrs_band, energy, fs=DEFAULT_FS, peaks=None, en
     if n == 0:
         return good, noise_score
 
-    if peaks is None:
-        peaks = _main_abs_peak_candidates(filtered, fs)
-    peaks = np.asarray(peaks, dtype=int)
+    peaks = np.asarray(peaks if peaks is not None else [], dtype=int)
+    density_peaks, _density_removed = _shape_filter(filtered, qrs_band, peaks, fs)
     if energy_peaks is None:
         energy_peaks = np.asarray([], dtype=int)
     else:
@@ -282,20 +317,24 @@ def _quality_mask(raw, filtered, qrs_band, energy, fs=DEFAULT_FS, peaks=None, en
         # Each window gets a few simple artifact features. The goal is only to
         # catch extreme noise blocks where the expert usually has no QRS labels.
         local_peaks = peaks[(peaks >= start) & (peaks < end)]
-        peak_count = len(local_peaks)
+        local_density_peaks = density_peaks[(density_peaks >= start) & (density_peaks < end)]
+        peak_count = len(local_density_peaks)
         energy_peak_count = int(np.sum((energy_peaks >= start) & (energy_peaks < end)))
         raw_range = float(np.ptp(raw[start:end]))
         filtered_std = float(np.std(filtered[start:end]))
         abs_median = float(np.median(abs_filtered[start:end]))
         abs_max = float(np.max(abs_filtered[start:end]))
         energy_max = float(np.max(energy[start:end])) if len(energy) else 0.0
+        local_qrs_band = qrs_band[start:end]
+        qrs_zero_crossings = int(np.sum(np.diff(np.signbit(local_qrs_band)) != 0))
+        qrs_p95 = float(np.percentile(np.abs(local_qrs_band), 95)) if end > start else 0.0
 
         # This is not a physical SNR. It is only a simple contrast score:
         # median detected-QRS height divided by the median background height in
         # the same window. Real QRS windows usually have a large ratio; artifact
         # sections often produce many weak "peaks" that do not stand out.
         if peak_count:
-            qrs_snr = float(np.median(abs_filtered[local_peaks]) / (abs_median + 1e-9))
+            qrs_snr = float(np.median(abs_filtered[local_density_peaks]) / (abs_median + 1e-9))
         else:
             qrs_snr = float("inf")
 
@@ -303,6 +342,29 @@ def _quality_mask(raw, filtered, qrs_band, energy, fs=DEFAULT_FS, peaks=None, en
             peak_count >= QRS_SNR_MIN_PEAKS
             and energy_peak_count >= QRS_SNR_MIN_ENERGY_PEAKS
             and qrs_snr < QRS_SNR_LOW
+        )
+        oscillatory_noise = (
+            peak_count >= OSC_NOISE_MIN_PEAKS
+            and energy_peak_count >= OSC_NOISE_MIN_ENERGY_PEAKS
+            and qrs_zero_crossings >= OSC_NOISE_MIN_ZERO_CROSSINGS
+            and qrs_snr < OSC_NOISE_QRS_SNR_LOW
+            and filtered_std >= OSC_NOISE_MIN_FILTERED_STD
+            and filtered_std <= OSC_NOISE_MAX_FILTERED_STD
+            and raw_range <= OSC_NOISE_MAX_RAW_RANGE
+            and qrs_p95 <= OSC_NOISE_MAX_QRS_P95
+        )
+        dense_low_contrast_noise = (
+            peak_count >= DENSE_LOW_CONTRAST_MIN_PEAKS
+            and energy_peak_count >= DENSE_LOW_CONTRAST_MIN_ENERGY_PEAKS
+            and qrs_zero_crossings >= DENSE_LOW_CONTRAST_MIN_ZERO_CROSSINGS
+            and qrs_zero_crossings <= DENSE_LOW_CONTRAST_MAX_ZERO_CROSSINGS
+            and abs_median >= DENSE_LOW_CONTRAST_MIN_ABS_MEDIAN
+            and filtered_std >= DENSE_LOW_CONTRAST_MIN_FILTERED_STD
+            and filtered_std <= DENSE_LOW_CONTRAST_MAX_FILTERED_STD
+            and raw_range <= DENSE_LOW_CONTRAST_MAX_RAW_RANGE
+            and qrs_p95 <= DENSE_LOW_CONTRAST_MAX_QRS_P95
+            and qrs_snr <= DENSE_LOW_CONTRAST_MAX_QRS_SNR
+            and float(np.median(np.abs(local_qrs_band))) >= DENSE_LOW_CONTRAST_MIN_QRS_MEDIAN
         )
         windows.append((start, end))
         low_snr_flags.append(low_snr)
@@ -325,6 +387,12 @@ def _quality_mask(raw, filtered, qrs_band, energy, fs=DEFAULT_FS, peaks=None, en
         if energy_max > ENERGY_BIG and raw_range > RAW_RANGE_ENERGY:
             bad = True
             score = max(score, 2.5)
+        if oscillatory_noise:
+            bad = True
+            score = max(score, OSCILLATORY_NOISE_SCORE)
+        if dense_low_contrast_noise:
+            bad = True
+            score = max(score, OSCILLATORY_NOISE_SCORE)
 
         if bad:
             # Pad a little around noisy windows because artifacts often start
@@ -364,10 +432,13 @@ def _shape_score(filtered, qrs_band, peak, fs=DEFAULT_FS):
     baseline = np.median(filtered[lo:hi])
     amp = abs(filtered[int(peak)] - baseline)
     qrs_amp = np.max(np.abs(qrs_band[lo:hi])) if len(qrs_band[lo:hi]) else 0.0
-    return float(amp + 0.25 * qrs_amp)
+    slope_lo = max(0, int(peak) - int(0.05 * fs))
+    slope_hi = min(len(filtered), int(peak) + int(0.05 * fs) + 1)
+    slope = np.max(np.abs(np.diff(filtered[slope_lo:slope_hi]))) if slope_hi - slope_lo > 1 else 0.0
+    return float(amp + SHAPE_SCORE_QRS_WEIGHT * qrs_amp + SHAPE_SCORE_SLOPE_WEIGHT * slope)
 
 
-def _shape_filter(filtered, qrs_band, energy, peaks, fs=DEFAULT_FS):
+def _shape_filter(filtered, qrs_band, peaks, fs=DEFAULT_FS):
     """Remove very close duplicate detections after quality filtering."""
     # Final close-peak cleanup. This catches some P/T-wave or duplicate QRS
     # detections that survive the first refractory merge.
@@ -393,87 +464,57 @@ def _shape_filter(filtered, qrs_band, energy, peaks, fs=DEFAULT_FS):
     return np.asarray(keep, dtype=int), np.asarray(removed, dtype=int)
 
 
-def _qrs_band_veto(qrs_band, peaks, fs=DEFAULT_FS):
-    """Remove broad-wave candidates that do not have local QRS-band support."""
-    peaks = np.asarray(sorted(set(np.asarray(peaks, dtype=int))), dtype=int)
-    if len(peaks) == 0:
-        return peaks, np.asarray([], dtype=int)
-
-    qrs_strength = np.abs(qrs_band)
-    baseline = float(np.median(qrs_strength[peaks]))
-    if baseline <= 0:
-        return peaks, np.asarray([], dtype=int)
-
-    radius = max(1, int(QRS_BAND_VETO_RADIUS_SEC * fs))
-    keep = []
-    removed = []
-    for peak in peaks:
-        lo = max(0, int(peak) - radius)
-        hi = min(len(qrs_strength), int(peak) + radius + 1)
-        local_qrs = float(np.max(qrs_strength[lo:hi])) if hi > lo else 0.0
-        if local_qrs >= QRS_BAND_VETO_RATIO * baseline:
-            keep.append(int(peak))
-        else:
-            removed.append(int(peak))
-
-    return np.asarray(keep, dtype=int), np.asarray(removed, dtype=int)
-
-
-def _late_positive_alignment_candidate(raw, qrs_band, peak, fs=DEFAULT_FS):
-    """Return a later positive-lobe candidate for a biphasic QRS, if present."""
+def _early_negative_alignment_candidate(filtered, qrs_band, peak, fs=DEFAULT_FS):
+    """Return an earlier negative QRS candidate when a later positive lobe was selected."""
     peak = int(peak)
-    context = max(1, int(0.35 * fs))
-    center_radius = max(1, int(LATE_ALIGN_CENTER_RADIUS_SEC * fs))
-    late_start = peak + int(LATE_ALIGN_POS_START_SEC * fs)
-    late_end = peak + int(LATE_ALIGN_POS_END_SEC * fs)
-    early_start = peak - center_radius
-    early_end = peak + center_radius
-
-    if early_start < 0 or late_end > len(raw) or late_end <= late_start:
+    lookback_start = peak - int(EARLY_ALIGN_LOOKBACK_MAX_SEC * fs)
+    lookback_end = peak - int(EARLY_ALIGN_LOOKBACK_MIN_SEC * fs) + 1
+    if lookback_end <= lookback_start or lookback_end <= 0:
         return None
 
-    context_lo = max(0, peak - context)
-    context_hi = min(len(raw), peak + int(0.45 * fs))
-    baseline = float(np.median(raw[context_lo:context_hi]))
-    late = raw[late_start:late_end] - baseline
-    early = raw[early_start:early_end] - baseline
-    if len(late) == 0 or len(early) == 0:
+    lookback_start = max(0, lookback_start)
+    lookback = qrs_band[lookback_start:lookback_end]
+    if len(lookback) == 0:
         return None
 
-    late_rel = int(np.argmax(late))
-    late_peak = late_start + late_rel
-    late_amp = float(late[late_rel])
-    early_max = float(np.max(early))
-    early_min = float(np.min(early))
+    early = lookback_start + int(np.argmin(lookback))
+    current_qrs = float(qrs_band[peak])
+    early_qrs = float(qrs_band[early])
+    if current_qrs <= EARLY_ALIGN_MIN_CURRENT_QRS:
+        return None
+    if early_qrs >= -EARLY_ALIGN_MIN_EARLY_QRS:
+        return None
+    if abs(early_qrs) < EARLY_ALIGN_MIN_QRS_RATIO * abs(current_qrs):
+        return None
 
-    is_negative_center = qrs_band[peak] < 0 and (raw[peak] - baseline) < 0
-    strong_late_lobe = (
-        late_amp >= LATE_ALIGN_POS_EARLY_RATIO * abs(early_max)
-        and late_amp >= LATE_ALIGN_POS_VALLEY_RATIO * abs(early_min)
-    )
-    if is_negative_center and strong_late_lobe:
-        return int(late_peak)
-    return None
+    context_lo = max(0, peak - int(0.12 * fs))
+    context_hi = min(len(filtered), peak + int(0.12 * fs) + 1)
+    if context_hi <= context_lo:
+        return None
+
+    baseline = float(np.median(filtered[context_lo:context_hi]))
+    if filtered[peak] - baseline <= EARLY_ALIGN_MIN_FILTERED_DELTA:
+        return None
+    if filtered[early] - baseline >= -EARLY_ALIGN_MIN_FILTERED_DELTA:
+        return None
+
+    return int(early)
 
 
-def _late_positive_alignment_stats(raw, qrs_band, peaks, fs=DEFAULT_FS):
-    """Count late-positive morphology candidates in the tail of a record."""
+def _early_negative_alignment_stats(filtered, qrs_band, peaks, fs=DEFAULT_FS):
     peaks = np.asarray(peaks, dtype=int)
-    tail_start = int(LATE_ALIGN_TRIGGER_START_SEC * fs)
-    tail_peaks = peaks[peaks >= tail_start]
-    if len(tail_peaks) == 0:
+    if len(peaks) == 0:
         return 0, 0, 0.0
 
     count = 0
-    for peak in tail_peaks:
-        if _late_positive_alignment_candidate(raw, qrs_band, peak, fs) is not None:
+    for peak in peaks:
+        if _early_negative_alignment_candidate(filtered, qrs_band, peak, fs) is not None:
             count += 1
-    fraction = count / len(tail_peaks)
-    return int(count), int(len(tail_peaks)), float(fraction)
+    return int(count), int(len(peaks)), float(count / len(peaks))
 
 
-def _align_late_positive_lobes(raw, qrs_band, peaks, fs=DEFAULT_FS):
-    """Move selected biphasic detections to the later positive lobe."""
+def _apply_early_negative_alignment_guard(filtered, qrs_band, peaks, fs=DEFAULT_FS):
+    """Move a record-level late-positive/T-like morphology back to the QRS valley."""
     peaks = np.asarray(sorted(set(np.asarray(peaks, dtype=int))), dtype=int)
     if len(peaks) == 0:
         return peaks, np.asarray([], dtype=int), np.asarray([], dtype=int), {
@@ -483,8 +524,8 @@ def _align_late_positive_lobes(raw, qrs_band, peaks, fs=DEFAULT_FS):
             "fraction": 0.0,
         }
 
-    count, total, fraction = _late_positive_alignment_stats(raw, qrs_band, peaks, fs)
-    triggered = count >= LATE_ALIGN_MIN_COUNT and fraction >= LATE_ALIGN_MIN_FRACTION
+    count, total, fraction = _early_negative_alignment_stats(filtered, qrs_band, peaks, fs)
+    triggered = count >= EARLY_ALIGN_MIN_COUNT and fraction >= EARLY_ALIGN_MIN_FRACTION
     stats = {
         "triggered": bool(triggered),
         "count": int(count),
@@ -494,15 +535,11 @@ def _align_late_positive_lobes(raw, qrs_band, peaks, fs=DEFAULT_FS):
     if not triggered:
         return peaks, np.asarray([], dtype=int), np.asarray([], dtype=int), stats
 
-    align_start = int(LATE_ALIGN_SCAN_START_SEC * fs)
     aligned = []
     moved_from = []
     moved_to = []
     for peak in peaks:
-        replacement = None
-        if peak >= align_start:
-            replacement = _late_positive_alignment_candidate(raw, qrs_band, peak, fs)
-
+        replacement = _early_negative_alignment_candidate(filtered, qrs_band, peak, fs)
         if replacement is None:
             aligned.append(int(peak))
         else:
@@ -511,18 +548,19 @@ def _align_late_positive_lobes(raw, qrs_band, peaks, fs=DEFAULT_FS):
             moved_to.append(int(replacement))
 
     return (
-        np.asarray(sorted(set(aligned)), dtype=int),
+        _merge_close_peaks(np.asarray(aligned, dtype=int), filtered, fs),
         np.asarray(moved_from, dtype=int),
         np.asarray(moved_to, dtype=int),
         stats,
     )
 
 
-def _adaptive_rr_cleanup(filtered, qrs_band, peaks, fs=DEFAULT_FS):
+def _adaptive_rr_cleanup(filtered, qrs_band, peaks, fs=DEFAULT_FS, protected_peaks=None):
     """Remove extra detections that are too dense for the record's rhythm."""
     peaks = np.asarray(sorted(set(np.asarray(peaks, dtype=int))), dtype=int)
     if len(peaks) < 3:
         return peaks, np.asarray([], dtype=int)
+    protected = set(np.asarray(protected_peaks if protected_peaks is not None else [], dtype=int).tolist())
 
     rr = np.diff(peaks)
     valid_rr = rr[(rr > int(0.30 * fs)) & (rr < int(2.0 * fs))]
@@ -551,7 +589,16 @@ def _adaptive_rr_cleanup(filtered, qrs_band, peaks, fs=DEFAULT_FS):
             continue
 
         old = keep[-1]
-        if rr_score(peak) > rr_score(old):
+        old_protected = int(old) in protected
+        peak_protected = int(peak) in protected
+        if old_protected and peak_protected:
+            keep.append(int(peak))
+        elif old_protected and not peak_protected:
+            removed.append(int(peak))
+        elif peak_protected and not old_protected:
+            removed.append(old)
+            keep[-1] = int(peak)
+        elif rr_score(peak) > rr_score(old):
             removed.append(old)
             keep[-1] = int(peak)
         else:
@@ -560,36 +607,207 @@ def _adaptive_rr_cleanup(filtered, qrs_band, peaks, fs=DEFAULT_FS):
     return np.asarray(keep, dtype=int), np.asarray(removed, dtype=int)
 
 
-def _rescue_quality_peaks(filtered, qrs_band, predicted_peaks, removed_peaks, fs=DEFAULT_FS):
-    """Restore isolated high-confidence QRS peaks removed by the quality gate."""
+def _weak_short_rr_cleanup(filtered, qrs_band, peaks, fs=DEFAULT_FS):
+    """Remove a clearly weaker duplicate from a locally noisy short-RR pair."""
+    peaks = np.asarray(sorted(set(np.asarray(peaks, dtype=int))), dtype=int)
+    if len(peaks) < 2:
+        return peaks, np.asarray([], dtype=int)
+
+    max_gap = int(WEAK_SHORT_RR_MAX_GAP_SEC * fs)
+    score_radius = max(1, int(WEAK_SHORT_RR_SCORE_RADIUS_SEC * fs))
+    pair_pad = max(1, int(WEAK_SHORT_RR_PAIR_PAD_SEC * fs))
+    keep = []
+    removed = []
+    i = 0
+
+    def local_score(peak):
+        peak = int(peak)
+        lo = max(0, peak - score_radius)
+        hi = min(len(filtered), peak + score_radius + 1)
+        if hi <= lo:
+            return 0.0
+        return float(np.max(np.abs(filtered[lo:hi])) + np.max(np.abs(qrs_band[lo:hi])))
+
+    while i < len(peaks):
+        if i + 1 < len(peaks) and peaks[i + 1] - peaks[i] <= max_gap:
+            left = int(peaks[i])
+            right = int(peaks[i + 1])
+            left_score = local_score(left)
+            right_score = local_score(right)
+            if left_score <= right_score:
+                weak_peak, strong_peak = left, right
+                weak_score, strong_score = left_score, right_score
+            else:
+                weak_peak, strong_peak = right, left
+                weak_score, strong_score = right_score, left_score
+
+            lo = max(0, min(left, right) - pair_pad)
+            hi = min(len(qrs_band), max(left, right) + pair_pad + 1)
+            pair_qrs = qrs_band[lo:hi]
+            zero_crossings = int(np.sum(np.diff(np.signbit(pair_qrs)) != 0)) if len(pair_qrs) > 1 else 0
+            weak_ratio = weak_score / (strong_score + 1e-9)
+            weak_duplicate = (
+                zero_crossings >= WEAK_SHORT_RR_MIN_ZERO_CROSSINGS
+                and weak_score <= WEAK_SHORT_RR_MAX_WEAK_SCORE
+                and weak_ratio <= WEAK_SHORT_RR_MAX_SCORE_RATIO
+            )
+            if weak_duplicate:
+                keep.append(strong_peak)
+                removed.append(weak_peak)
+                i += 2
+                continue
+
+        keep.append(int(peaks[i]))
+        i += 1
+
+    return np.asarray(sorted(set(keep)), dtype=int), np.asarray(removed, dtype=int)
+
+
+def _rescue_artifact_neighbor_qrs(raw, filtered, qrs_band, noise_score, predicted_peaks, removed_noise_peaks, fs=DEFAULT_FS):
+    """Restore high-confidence QRS peaks removed only because their window was noisy."""
     predicted_peaks = np.asarray(sorted(set(np.asarray(predicted_peaks, dtype=int))), dtype=int)
-    removed_peaks = np.asarray(sorted(set(np.asarray(removed_peaks, dtype=int))), dtype=int)
-    if len(removed_peaks) == 0:
+    removed_noise_peaks = np.asarray(sorted(set(np.asarray(removed_noise_peaks, dtype=int))), dtype=int)
+    if len(removed_noise_peaks) == 0:
         return predicted_peaks, np.asarray([], dtype=int)
 
     abs_filtered = np.abs(filtered)
     qrs_strength = np.abs(qrs_band)
-    min_nearest = int(QUALITY_RESCUE_MIN_NEAREST_SEC * fs)
+    min_nearest = int(ARTIFACT_RESCUE_MIN_NEAREST_SEC * fs)
+    short_radius = max(2, int(0.08 * fs))
+    context_radius = max(1, int(0.60 * fs))
+    rhythm_context_radius = max(1, int(0.25 * fs))
+    rhythm_min_gap = int(RHYTHM_RESCUE_MIN_GAP_SEC * fs)
+    rhythm_max_gap = int(RHYTHM_RESCUE_MAX_GAP_SEC * fs)
+    rhythm_candidates = np.asarray(
+        sorted(set(np.concatenate([predicted_peaks, removed_noise_peaks]))),
+        dtype=int,
+    )
     keep = []
-    for peak in removed_peaks:
+
+    for peak in removed_noise_peaks:
         peak = int(peak)
         nearest = np.min(np.abs(predicted_peaks - peak)) if len(predicted_peaks) else np.inf
         if nearest <= min_nearest:
             continue
-
-        lo = max(0, peak - int(0.50 * fs))
-        hi = min(len(filtered), peak + int(0.50 * fs) + 1)
-        if hi <= lo:
+        if peak >= len(noise_score):
+            continue
+        if noise_score[peak] >= OSCILLATORY_NOISE_SCORE:
             continue
 
-        if abs(qrs_band[peak]) < QUALITY_RESCUE_MIN_QRS_BAND:
-            continue
-        if np.median(abs_filtered[lo:hi]) >= QUALITY_RESCUE_MAX_ABS_MEDIAN:
-            continue
-        if np.median(qrs_strength[lo:hi]) >= QUALITY_RESCUE_MAX_QRS_MEDIAN:
+        slo = max(0, peak - short_radius)
+        shi = min(len(filtered), peak + short_radius + 1)
+        clo = max(0, peak - context_radius)
+        chi = min(len(filtered), peak + context_radius + 1)
+        if shi <= slo or chi <= clo:
             continue
 
-        keep.append(peak)
+        local_filtered = float(np.max(abs_filtered[slo:shi]))
+        local_qrs = float(np.max(qrs_strength[slo:shi]))
+        context_median = float(np.median(abs_filtered[clo:chi]))
+        context_raw_range = float(np.ptp(raw[clo:chi]))
+        context_filtered_std = float(np.std(filtered[clo:chi]))
+        contrast = local_filtered / (context_median + 1e-9)
+        half_level = context_median + 0.5 * max(0.0, local_filtered - context_median)
+        half_width = int(np.sum(abs_filtered[slo:shi] >= half_level))
+
+        rlo = max(0, peak - rhythm_context_radius)
+        rhi = min(len(filtered), peak + rhythm_context_radius + 1)
+        rhythm_median = float(np.median(abs_filtered[rlo:rhi])) if rhi > rlo else context_median
+        rhythm_raw_range = float(np.ptp(raw[rlo:rhi])) if rhi > rlo else context_raw_range
+        rhythm_filtered_std = float(np.std(filtered[rlo:rhi])) if rhi > rlo else context_filtered_std
+        rhythm_contrast = local_filtered / (rhythm_median + 1e-9)
+        rhythm_half_level = rhythm_median + 0.5 * max(0.0, local_filtered - rhythm_median)
+        rhythm_half_width = int(np.sum(abs_filtered[slo:shi] >= rhythm_half_level))
+
+        order_idx = int(np.searchsorted(rhythm_candidates, peak))
+        left_gap = None
+        right_gap = None
+        if order_idx > 0:
+            left_gap = int(peak - rhythm_candidates[order_idx - 1])
+        if order_idx + 1 < len(rhythm_candidates):
+            right_gap = int(rhythm_candidates[order_idx + 1] - peak)
+        has_rhythm_neighbors = (
+            left_gap is not None
+            and right_gap is not None
+            and rhythm_min_gap <= left_gap <= rhythm_max_gap
+            and rhythm_min_gap <= right_gap <= rhythm_max_gap
+            and min(left_gap, right_gap) / max(left_gap, right_gap) >= 1.0 / RHYTHM_RESCUE_MAX_GAP_RATIO
+        )
+
+        low_amplitude_clean_qrs = (
+            local_qrs >= LOW_AMP_RESCUE_MIN_QRS_BAND
+            and local_filtered >= LOW_AMP_RESCUE_MIN_FILTERED
+            and context_median <= LOW_AMP_RESCUE_MAX_ABS_MEDIAN
+            and context_raw_range <= LOW_AMP_RESCUE_MAX_RAW_RANGE
+            and context_filtered_std <= LOW_AMP_RESCUE_MAX_FILTERED_STD
+            and contrast >= LOW_AMP_RESCUE_MIN_CONTRAST
+        )
+
+        medium_amplitude_clean_qrs = (
+            local_qrs >= MEDIUM_AMP_RESCUE_MIN_QRS_BAND
+            and local_filtered >= MEDIUM_AMP_RESCUE_MIN_FILTERED
+            and context_median <= MEDIUM_AMP_RESCUE_MAX_ABS_MEDIAN
+            and context_raw_range <= MEDIUM_AMP_RESCUE_MAX_RAW_RANGE
+            and context_filtered_std <= MEDIUM_AMP_RESCUE_MAX_FILTERED_STD
+            and contrast >= MEDIUM_AMP_RESCUE_MIN_CONTRAST
+        )
+
+        artifact_edge_qrs = (
+            local_qrs >= ARTIFACT_RESCUE_MIN_QRS_BAND
+            and local_filtered >= ARTIFACT_RESCUE_MIN_FILTERED
+            and context_median <= ARTIFACT_RESCUE_MAX_ABS_MEDIAN
+            and context_raw_range <= ARTIFACT_RESCUE_MAX_RAW_RANGE
+            and context_filtered_std <= ARTIFACT_RESCUE_MAX_FILTERED_STD
+            and contrast >= ARTIFACT_RESCUE_MIN_CONTRAST
+        )
+
+        strong_artifact_edge_qrs = (
+            noise_score[peak] >= ARTIFACT_RESCUE_MIN_NOISE_SCORE
+            and local_qrs >= ARTIFACT_RESCUE_STRONG_QRS_BAND
+            and local_qrs <= ARTIFACT_RESCUE_MAX_STRONG_QRS_BAND
+            and local_filtered >= ARTIFACT_RESCUE_STRONG_FILTERED
+            and local_filtered <= ARTIFACT_RESCUE_MAX_STRONG_FILTERED
+            and context_median <= ARTIFACT_RESCUE_MAX_ABS_MEDIAN
+            and contrast >= 3.2
+            and half_width <= ARTIFACT_RESCUE_MAX_HALF_WIDTH
+        )
+
+        regular_rhythm_masked_qrs = (
+            has_rhythm_neighbors
+            and local_qrs >= RHYTHM_RESCUE_MIN_QRS_BAND
+            and local_qrs <= RHYTHM_RESCUE_MAX_QRS_BAND
+            and local_filtered >= RHYTHM_RESCUE_MIN_FILTERED
+            and local_filtered <= RHYTHM_RESCUE_MAX_FILTERED
+            and rhythm_median <= RHYTHM_RESCUE_MAX_ABS_MEDIAN
+            and rhythm_raw_range <= RHYTHM_RESCUE_MAX_RAW_RANGE
+            and rhythm_filtered_std <= RHYTHM_RESCUE_MAX_FILTERED_STD
+            and rhythm_contrast >= RHYTHM_RESCUE_MIN_CONTRAST
+            and rhythm_half_width <= RHYTHM_RESCUE_MAX_HALF_WIDTH
+        )
+
+        mild_mask_regular_qrs = (
+            has_rhythm_neighbors
+            and noise_score[peak] <= MILD_MASK_RHYTHM_RESCUE_MAX_NOISE_SCORE
+            and local_qrs >= MILD_MASK_RHYTHM_RESCUE_MIN_QRS_BAND
+            and local_qrs <= MILD_MASK_RHYTHM_RESCUE_MAX_QRS_BAND
+            and local_filtered >= MILD_MASK_RHYTHM_RESCUE_MIN_FILTERED
+            and local_filtered <= MILD_MASK_RHYTHM_RESCUE_MAX_FILTERED
+            and context_median <= MILD_MASK_RHYTHM_RESCUE_MAX_ABS_MEDIAN
+            and context_raw_range <= MILD_MASK_RHYTHM_RESCUE_MAX_RAW_RANGE
+            and context_filtered_std <= MILD_MASK_RHYTHM_RESCUE_MAX_FILTERED_STD
+            and contrast >= MILD_MASK_RHYTHM_RESCUE_MIN_CONTRAST
+            and half_width <= MILD_MASK_RHYTHM_RESCUE_MAX_HALF_WIDTH
+        )
+
+        if (
+            low_amplitude_clean_qrs
+            or medium_amplitude_clean_qrs
+            or artifact_edge_qrs
+            or strong_artifact_edge_qrs
+            or regular_rhythm_masked_qrs
+            or mild_mask_regular_qrs
+        ):
+            keep.append(peak)
 
     if not keep:
         return predicted_peaks, np.asarray([], dtype=int)
@@ -597,43 +815,6 @@ def _rescue_quality_peaks(filtered, qrs_band, predicted_peaks, removed_peaks, fs
     rescued = np.asarray(keep, dtype=int)
     merged = np.asarray(sorted(set(np.concatenate([predicted_peaks, rescued]))), dtype=int)
     return _merge_close_peaks(merged, filtered, fs), rescued
-
-
-def _final_morphology_cleanup(filtered, qrs_band, peaks, fs=DEFAULT_FS):
-    """Remove residual low-confidence detections from the final sequence."""
-    peaks = np.asarray(sorted(set(np.asarray(peaks, dtype=int))), dtype=int)
-    if len(peaks) == 0:
-        return peaks, np.asarray([], dtype=int)
-
-    abs_filtered = np.abs(filtered)
-    keep = []
-    removed = []
-    radius = int(0.50 * fs)
-    for peak in peaks:
-        peak = int(peak)
-        lo = max(0, peak - radius)
-        hi = min(len(filtered), peak + radius + 1)
-        if hi <= lo:
-            keep.append(peak)
-            continue
-
-        baseline = np.median(filtered[lo:hi])
-        filtered_amp = abs(filtered[peak] - baseline)
-        qrs_amp = abs(qrs_band[peak])
-        local_abs_median = np.median(abs_filtered[lo:hi])
-
-        noisy_weak_peak = (
-            qrs_amp < FINAL_NOISY_QRS_MAX
-            and filtered_amp < FINAL_NOISY_FILTERED_MAX
-            and local_abs_median >= FINAL_NOISY_ABS_MEDIAN_MIN
-        )
-        extremely_weak_peak = qrs_amp < FINAL_WEAK_QRS_MAX and filtered_amp < FINAL_WEAK_FILTERED_MAX
-        if noisy_weak_peak or extremely_weak_peak:
-            removed.append(peak)
-        else:
-            keep.append(peak)
-
-    return np.asarray(keep, dtype=int), np.asarray(removed, dtype=int)
 
 
 def _detect_qrs_all(raw, fs=DEFAULT_FS):
@@ -644,20 +825,8 @@ def _detect_qrs_all(raw, fs=DEFAULT_FS):
     qrs_band = qrs_bandpass(raw, fs)
 
     energy_peaks, energy_integrated, energy_threshold = _energy_peak_candidates_debug(qrs_band, fs)
-
-    if USE_ABS_MAIN_BRANCH:
-        # Legacy path: abs(filtered) is the main detector and energy fills gaps.
-        main_peaks, abs_filtered, main_threshold = _main_abs_peak_candidates_debug(filtered, fs)
-        preliminary_peaks = _fill_long_gaps(main_peaks, energy_peaks, filtered, fs)
-    else:
-        # Current path: avoid the abs(filtered) detector and use the QRS energy
-        # branch directly as the candidate source.
-        main_peaks = np.asarray([], dtype=int)
-        abs_filtered = np.abs(filtered)
-        main_threshold = float("nan")
-        preliminary_peaks = _merge_close_peaks(energy_peaks, filtered, fs)
-
-    preliminary_peaks, removed_qrs_band_peaks = _qrs_band_veto(qrs_band, preliminary_peaks, fs)
+    main_peaks, abs_filtered, main_threshold = _main_abs_peak_candidates_debug(filtered, fs)
+    preliminary_peaks = _fill_long_gaps(main_peaks, energy_peaks, filtered, fs)
 
     quality_mask, noise_score = _quality_mask(
         raw,
@@ -676,33 +845,41 @@ def _detect_qrs_all(raw, fs=DEFAULT_FS):
     in_quality = quality_mask[preliminary_peaks] if len(preliminary_peaks) else np.asarray([], dtype=bool)
     quality_peaks = preliminary_peaks[in_quality]
     removed_noise_peaks = preliminary_peaks[~in_quality]
-    shaped_peaks, removed_shape_peaks = _shape_filter(filtered, qrs_band, energy_integrated, quality_peaks, fs)
+    shaped_peaks, removed_shape_peaks = _shape_filter(filtered, qrs_band, quality_peaks, fs)
     predicted_peaks = _merge_close_peaks(shaped_peaks, filtered, fs)
-    aligned_peaks, aligned_from_peaks, aligned_to_peaks, alignment_stats = _align_late_positive_lobes(
+
+    predicted_peaks, rescued_artifact_peaks = _rescue_artifact_neighbor_qrs(
         raw,
-        qrs_band,
-        predicted_peaks,
-        fs,
-    )
-    predicted_peaks, removed_rr_peaks = _adaptive_rr_cleanup(filtered, qrs_band, aligned_peaks, fs)
-    rescue_input_peaks = np.concatenate([removed_noise_peaks, removed_shape_peaks, removed_rr_peaks])
-    predicted_peaks, rescued_quality_peaks = _rescue_quality_peaks(
         filtered,
         qrs_band,
+        noise_score,
         predicted_peaks,
-        rescue_input_peaks,
+        removed_noise_peaks,
         fs,
     )
-    predicted_peaks, removed_rr_peaks_after_rescue = _adaptive_rr_cleanup(filtered, qrs_band, predicted_peaks, fs)
-    if alignment_stats["triggered"]:
-        removed_final_morphology_peaks = np.asarray([], dtype=int)
-    else:
-        predicted_peaks, removed_final_morphology_peaks = _final_morphology_cleanup(
+
+    aligned_peaks, early_aligned_from_peaks, early_aligned_to_peaks, early_alignment_stats = (
+        _apply_early_negative_alignment_guard(
             filtered,
             qrs_band,
             predicted_peaks,
             fs,
         )
+    )
+
+    predicted_peaks, removed_rr_peaks = _adaptive_rr_cleanup(
+        filtered,
+        qrs_band,
+        aligned_peaks,
+        fs,
+        protected_peaks=rescued_artifact_peaks,
+    )
+    predicted_peaks, removed_weak_short_rr_peaks = _weak_short_rr_cleanup(
+        filtered,
+        qrs_band,
+        predicted_peaks,
+        fs,
+    )
 
     return {
         "filtered": filtered,
@@ -716,19 +893,17 @@ def _detect_qrs_all(raw, fs=DEFAULT_FS):
         "quality_input_peaks": preliminary_peaks.astype(int),
         "quality_mask": quality_mask,
         "noise_score": noise_score,
-        "removed_qrs_band_peaks": removed_qrs_band_peaks.astype(int),
         "removed_noise_peaks": removed_noise_peaks.astype(int),
         "removed_shape_peaks": removed_shape_peaks.astype(int),
-        "aligned_from_peaks": aligned_from_peaks.astype(int),
-        "aligned_to_peaks": aligned_to_peaks.astype(int),
-        "alignment_triggered": alignment_stats["triggered"],
-        "alignment_candidate_count": alignment_stats["count"],
-        "alignment_candidate_total": alignment_stats["total"],
-        "alignment_candidate_fraction": alignment_stats["fraction"],
+        "early_aligned_from_peaks": early_aligned_from_peaks.astype(int),
+        "early_aligned_to_peaks": early_aligned_to_peaks.astype(int),
+        "early_alignment_triggered": early_alignment_stats["triggered"],
+        "early_alignment_candidate_count": early_alignment_stats["count"],
+        "early_alignment_candidate_total": early_alignment_stats["total"],
+        "early_alignment_candidate_fraction": early_alignment_stats["fraction"],
         "removed_rr_peaks": removed_rr_peaks.astype(int),
-        "rescued_quality_peaks": rescued_quality_peaks.astype(int),
-        "removed_rr_peaks_after_rescue": removed_rr_peaks_after_rescue.astype(int),
-        "removed_final_morphology_peaks": removed_final_morphology_peaks.astype(int),
+        "rescued_artifact_peaks": rescued_artifact_peaks.astype(int),
+        "removed_weak_short_rr_peaks": removed_weak_short_rr_peaks.astype(int),
         "predicted_peaks": predicted_peaks.astype(int),
     }
 
@@ -746,7 +921,8 @@ def detect_qrs_debug(raw, fs=DEFAULT_FS):
 
 def predict_peaks(raw):
     """Compatibility wrapper for callers that only need peak sample indices."""
-    return detect_qrs(raw, DEFAULT_FS)
+    _filtered, peaks = detect_qrs(raw, DEFAULT_FS)
+    return peaks
 
 
 def load_recording(mat_path, index, max_len=None):
@@ -762,77 +938,3 @@ def load_recording(mat_path, index, max_len=None):
         expert = data["QRSexpert"].ravel()[index].ravel().astype(int) - 1
         expert = expert[(expert >= 0) & (expert < len(raw))]
     return raw, expert
-
-
-def save_overlay_plot(
-    raw,
-    expert,
-    filtered,
-    predicted,
-    out_path,
-    record_number,
-    start=0,
-    length=15_000,
-    show_raw=False,
-    fs=DEFAULT_FS,
-):
-    """Save a static predicted-vs-expert overlay for one record segment."""
-    import os
-    import matplotlib
-
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MPLCONFIGDIR", str(out_path.parent / ".matplotlib"))
-
-    matplotlib.use("Agg", force=True)
-    import matplotlib.pyplot as plt
-
-    start = max(0, min(int(start), len(filtered) - 1))
-    end = min(start + int(length), len(filtered))
-    sl = slice(start, end)
-    t = np.arange(start, end) / fs
-
-    predicted = np.asarray(predicted, dtype=int)
-    pred_vis = predicted[(predicted >= start) & (predicted < end)]
-
-    expert_vis = np.asarray([], dtype=int)
-    if expert is not None:
-        expert = np.asarray(expert, dtype=int)
-        expert_vis = expert[(expert >= start) & (expert < end)]
-
-    plt.figure(figsize=(16, 5))
-    if show_raw:
-        plt.plot(t, raw[sl], color="#9ecae1", linewidth=0.7, alpha=0.7, label="Raw ECG")
-    plt.plot(t, filtered[sl], color="0.15", linewidth=0.9, label="Filtered ECG")
-
-    if len(pred_vis):
-        plt.scatter(
-            pred_vis / fs,
-            filtered[pred_vis],
-            s=28,
-            c="tab:orange",
-            marker="v",
-            label=f"Predicted ({len(pred_vis)})",
-            zorder=5,
-        )
-
-    if len(expert_vis):
-        plt.scatter(
-            expert_vis / fs,
-            filtered[expert_vis],
-            s=45,
-            facecolors="none",
-            edgecolors="tab:green",
-            linewidths=1.6,
-            label=f"Expert ({len(expert_vis)})",
-            zorder=6,
-        )
-
-    plt.title(f"Record {record_number} QRS overlay, samples [{start}:{end})")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Amplitude (uV, filtered)")
-    plt.grid(alpha=0.25)
-    plt.legend(loc="upper right")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=160)
-    plt.close()

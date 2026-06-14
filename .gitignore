@@ -1,8 +1,0 @@
-.DS_Store
-dataSet/
-__pycache__/
-*.py[cod]
-*$py.class
-ECG_Detection.code-workspace
-/outputs
-*.code-workspace

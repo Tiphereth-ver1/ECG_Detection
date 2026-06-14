@@ -114,13 +114,12 @@ def run_qrs_debug_viewer(
         "Energy candidates": False,
         "Quality mask": False,
         "Noise score": False,
-        "Removed QRS-band": True,
         "Removed noise": True,
         "Removed shape": True,
-        "Aligned late": True,
+        "Early alignment": True,
         "Removed RR": True,
-        "Rescued quality": True,
-        "Removed final": True,
+        "Artifact rescue": True,
+        "Weak short-RR": True,
     }
 
     def get_full(patient_idx):
@@ -168,17 +167,16 @@ def run_qrs_debug_viewer(
         noise_score = debug.get("noise_score", np.zeros(n_samples, dtype=float))
 
         # Convert full-record peak arrays into per-window arrays so scatter
-        # calls do not draw hidden points outside the current x-limits.
+        # calls do not draw points outside the current x-limits.
         pred_vis = _peaks_in_window(debug["predicted_peaks"], start_i, end)
         main_vis = _peaks_in_window(debug["main_peaks"], start_i, end)
         energy_vis = _peaks_in_window(debug["energy_peaks"], start_i, end)
         removed_noise_vis = _peaks_in_window(debug.get("removed_noise_peaks", []), start_i, end)
-        removed_qrs_band_vis = _peaks_in_window(debug.get("removed_qrs_band_peaks", []), start_i, end)
         removed_shape_vis = _peaks_in_window(debug.get("removed_shape_peaks", []), start_i, end)
-        aligned_to_vis = _peaks_in_window(debug.get("aligned_to_peaks", []), start_i, end)
+        early_aligned_to_vis = _peaks_in_window(debug.get("early_aligned_to_peaks", []), start_i, end)
         removed_rr_vis = _peaks_in_window(debug.get("removed_rr_peaks", []), start_i, end)
-        rescued_quality_vis = _peaks_in_window(debug.get("rescued_quality_peaks", []), start_i, end)
-        removed_final_vis = _peaks_in_window(debug.get("removed_final_morphology_peaks", []), start_i, end)
+        rescued_artifact_vis = _peaks_in_window(debug.get("rescued_artifact_peaks", []), start_i, end)
+        removed_weak_short_vis = _peaks_in_window(debug.get("removed_weak_short_rr_peaks", []), start_i, end)
 
         if expert_full is None:
             expert_vis = np.asarray([], dtype=int)
@@ -259,18 +257,6 @@ def run_qrs_debug_viewer(
                 zorder=10,
             )
 
-        if layer_visible["Removed QRS-band"] and len(removed_qrs_band_vis):
-            ax.scatter(
-                removed_qrs_band_vis / DEFAULT_FS,
-                filtered[removed_qrs_band_vis],
-                s=38,
-                color="tab:pink",
-                marker="x",
-                linewidths=1.1,
-                label=f"Removed QRS-band ({len(removed_qrs_band_vis)})",
-                zorder=10,
-            )
-
         if layer_visible["Removed shape"] and len(removed_shape_vis):
             ax.scatter(
                 removed_shape_vis / DEFAULT_FS,
@@ -283,16 +269,16 @@ def run_qrs_debug_viewer(
                 zorder=10,
             )
 
-        if layer_visible["Aligned late"] and len(aligned_to_vis):
+        if layer_visible["Early alignment"] and len(early_aligned_to_vis):
             ax.scatter(
-                aligned_to_vis / DEFAULT_FS,
-                filtered[aligned_to_vis],
+                early_aligned_to_vis / DEFAULT_FS,
+                filtered[early_aligned_to_vis],
                 s=58,
                 facecolors="none",
                 edgecolors="tab:blue",
                 marker="D",
                 linewidths=1.5,
-                label=f"Aligned late ({len(aligned_to_vis)})",
+                label=f"Early alignment ({len(early_aligned_to_vis)})",
                 zorder=11,
             )
 
@@ -308,28 +294,28 @@ def run_qrs_debug_viewer(
                 zorder=10,
             )
 
-        if layer_visible["Rescued quality"] and len(rescued_quality_vis):
+        if layer_visible["Artifact rescue"] and len(rescued_artifact_vis):
             ax.scatter(
-                rescued_quality_vis / DEFAULT_FS,
-                filtered[rescued_quality_vis],
+                rescued_artifact_vis / DEFAULT_FS,
+                filtered[rescued_artifact_vis],
                 s=62,
                 facecolors="none",
                 edgecolors="tab:cyan",
                 marker="P",
                 linewidths=1.5,
-                label=f"Rescued quality ({len(rescued_quality_vis)})",
+                label=f"Artifact rescue ({len(rescued_artifact_vis)})",
                 zorder=11,
             )
 
-        if layer_visible["Removed final"] and len(removed_final_vis):
+        if layer_visible["Weak short-RR"] and len(removed_weak_short_vis):
             ax.scatter(
-                removed_final_vis / DEFAULT_FS,
-                filtered[removed_final_vis],
+                removed_weak_short_vis / DEFAULT_FS,
+                filtered[removed_weak_short_vis],
                 s=48,
                 color="tab:gray",
                 marker="x",
                 linewidths=1.3,
-                label=f"Removed final ({len(removed_final_vis)})",
+                label=f"Weak short-RR ({len(removed_weak_short_vis)})",
                 zorder=10,
             )
 
